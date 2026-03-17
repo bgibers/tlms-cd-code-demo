@@ -1,8 +1,23 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: AccountBalance
+-- PURPOSE: Demonstrates Daml's privacy model with asset transfers.
+--          Shows how lookupByKey is used for privacy-aware merging.
+-- LEARNING FOCUS: Sub-transaction privacy, lookupByKey, contract key visibility
+-- ============================================================
+-- DAML PRIVACY MODEL:
+--   A party can only see contracts where they are a SIGNATORY or OBSERVER.
+--   Fetching a contract you can't see = FAILURE (not just None).
+--   lookupByKey returns None if the contract doesn't exist OR is invisible.
+--   This means privacy is enforced at the data access level.
+-- ============================================================
 module AccountBalance where
 
+-- ===== TEMPLATE: Asset =====
+-- Represents a balance/asset held by an owner, issued by an issuer.
+-- KEY: (issuer, owner) — one asset per issuer-owner pair (not UTXO model).
 template Asset
   with
     issuer: Party
@@ -10,23 +25,48 @@ template Asset
     amount : Decimal
   where
     signatory issuer, owner
-    ensure amount > 0.0 
 
-    key (issuer, owner): (Party, Party) 
+    -- PRIVACY: Only issuer and owner see this contract.
+    -- Other parties cannot see your balance — privacy by default!
+
+    -- DAML CONCEPT: ensure
+    ensure amount > 0.0   -- can't have zero or negative assets
+
+    -- DAML CONCEPT: Contract key
+    -- (issuer, owner): only ONE Asset per issuer-owner pair at a time.
+    -- WHY: Balance model (not UTXO). Each asset represents a running total.
+    key (issuer, owner): (Party, Party)
+    -- DAML CONCEPT: maintainer key._1
+    -- The issuer (first element of the key tuple) maintains uniqueness.
     maintainer key._1
 
+    -- ===== CHOICE: Asset_Transfer =====
+    -- Reduces the current balance and creates a TransferProposal.
+    -- NOTE: This splits the current asset (keeps residual) and creates proposal.
+    -- This differs from UTXO — see UTXO.daml for the other approach.
     choice Asset_Transfer: ContractId AssetTransferProposal
       with
         recipient: Party
         transferAmount: Decimal
       controller owner
       do
-        create this with amount = amount - transferAmount
+        -- DAML CONCEPT: Multiple creates in one choice
+        -- The current contract is archived (consuming), then TWO new contracts are created:
+        -- 1. A residual asset with reduced amount (owner keeps the rest)
+        -- 2. A TransferProposal for the recipient to accept
+        create this with amount = amount - transferAmount   -- owner's remaining balance
 
+        -- DAML CONCEPT: '..' record spread
+        -- '..' copies all fields from 'this' that match the target template.
+        -- Here: issuer and owner are copied from 'this'.
         create AssetTransferProposal with
           amount = transferAmount
-          ..
+          ..   -- copies: issuer = issuer, owner = owner
 
+
+-- ===== TEMPLATE: AssetTransferProposal =====
+-- A pending asset transfer that the recipient must accept.
+-- PRIVACY: recipient is observer — they can see this proposal.
 template AssetTransferProposal
   with
     issuer: Party
@@ -38,24 +78,51 @@ template AssetTransferProposal
     observer recipient
     ensure amount > 0.0
 
+    -- ===== CHOICE: AssetTransferProposal_Accept =====
+    -- Recipient accepts the transfer.
+    -- DAML CONCEPT: lookupByKey
+    -- lookupByKey @Asset (issuer, recipient) looks for an existing Asset for the recipient.
+    -- Returns: Optional (ContractId Asset)
+    --   None = no asset exists for this issuer-recipient pair (recipient has none)
+    --   Some cid = recipient already has an asset with this issuer (merge amounts)
+    --
+    -- PRIVACY: If the recipient has no visible asset, lookupByKey returns None.
+    -- This is the correct behavior — you can't see what you don't have access to.
     choice AssetTransferProposal_Accept: ContractId Asset
       controller recipient
       do
-        assetCid <- lookupByKey @Asset (issuer, recipient) 
+        -- DAML CONCEPT: lookupByKey @Template key
+        -- Safely looks up a contract by key. Returns Optional ContractId.
+        -- Doesn't fail if key doesn't exist — returns None instead.
+        assetCid <- lookupByKey @Asset (issuer, recipient)
         case assetCid of
-            None -> create Asset with 
+            -- CASE: No existing asset for recipient → create new one
+            None -> create Asset with
                 owner = recipient
-                ..
-            Some assetCid -> do 
+                ..   -- copies: issuer = issuer, amount = amount (transferred amount)
+
+            -- CASE: Recipient already has an asset from same issuer → merge
+            Some assetCid -> do
+                -- DAML CONCEPT: fetch assetCid
+                -- Retrieves the full Asset record (not just the ContractId).
+                -- Required because we need asset.amount to compute merged total.
                 asset <- fetch assetCid
+                -- DAML CONCEPT: archive assetCid
+                -- Manually archives the existing asset before creating merged one.
+                -- Without this, creating a new asset with the same key would fail.
                 archive assetCid
                 create Asset with
                     owner = recipient
-                    amount = asset.amount + amount
+                    amount = asset.amount + amount   -- merge: existing + transferred
                     ..
 
+    -- ===== CHOICE: AssetTransferProposal_Reject =====
+    -- Recipient rejects — proposal is cancelled, sender keeps their reduced balance.
+    -- NOTE: The residual asset (created in Asset_Transfer) still exists for the owner.
+    -- The owner already "lost" the transferAmount from their balance.
+    -- WHY: The owner would need to create a new asset or merge to get it back.
+    -- This is a simplification — production systems would return funds on reject.
     choice AssetTransferProposal_Reject: ContractId AssetTransferProposal
       controller recipient
       do
-        create this with recipient = owner
-
+        create this with recipient = owner   -- redirect to owner (essentially cancel)

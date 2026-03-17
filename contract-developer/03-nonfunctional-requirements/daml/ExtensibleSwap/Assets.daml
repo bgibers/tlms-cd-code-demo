@@ -1,77 +1,124 @@
-module ExtensibleSwap.Assets where 
+-- ============================================================
+-- MODULE: ExtensibleSwap.Assets
+-- PURPOSE: Concrete implementations of the IAsset and ITransferProposal
+--          interfaces for Cash and Bond asset types.
+-- LEARNING FOCUS: Implementing interfaces, toInterface, interface instance
+-- ============================================================
+-- KEY CONCEPTS:
+--   'interface instance IAsset for Cash where'  — Cash implements IAsset
+--   'toInterface (this with owner = newOwner)'  — upcast to IAsset
+--   'view $ toInterface @IAsset cash'           — get the VAsset view
+-- ============================================================
+module ExtensibleSwap.Assets where
 
 import ExtensibleSwap.Interfaces
 
-template Cash 
-  with 
-    issuer: Party 
-    owner: Party 
+-- ===== TEMPLATE: Cash =====
+-- A cash asset that implements the IAsset interface.
+-- Concrete template with actual fields and signatories.
+template Cash
+  with
+    issuer: Party
+    owner: Party
     obs: [Party]
-    quantity: Decimal 
-  where 
-    signatory [issuer, owner] 
-    observer obs 
+    quantity: Decimal
+  where
+    signatory [issuer, owner]   -- list syntax for signatories
+    observer obs                -- obs field provides observer list
 
-    interface instance IAsset for Cash where 
-      view = VAsset with 
+    -- DAML CONCEPT: interface instance
+    -- 'interface instance IAsset for Cash where' implements the IAsset interface.
+    -- Must provide:
+    --   1. view function — returns VAsset
+    --   2. All methods: setOwner, setObs, setQuantity, transferTo
+    interface instance IAsset for Cash where
+      -- DAML CONCEPT: view implementation
+      -- Returns a VAsset record with this Cash contract's data.
+      -- '..' copies matching fields: issuer, owner, obs, quantity
+      -- 'assetType = "Cash"' is added (not a Cash field — specific to the view)
+      view = VAsset with
         assetType = "Cash"
-        .. 
+        ..   -- expands to: issuer = issuer; owner = owner; obs = obs; quantity = quantity
+
+      -- DAML CONCEPT: toInterface
+      -- 'toInterface x' converts a concrete value to its interface type.
+      -- Returns an IAsset interface value wrapping this Cash (with owner changed).
+      -- The 'with owner = newOwner' creates a new Cash record.
       setOwner newOwner = toInterface (this with owner = newOwner)
       setObs newObs = toInterface (this with obs = newObs)
       setQuantity newQuantity = toInterface (this with quantity = newQuantity)
+
+      -- transferTo: create a CashTransferProposal, then wrap as ITransferProposal
       transferTo newOwner = toInterface $ CashTransferProposal with cash = this; ..
-     
------------------------------------
+      -- '..' here copies 'newOwner' from the argument (it's in scope)
 
-template CashTransferProposal 
-  with 
-    newOwner: Party 
-    cash: Cash 
 
-  where 
+-- ===== TEMPLATE: CashTransferProposal =====
+-- The concrete transfer proposal for Cash assets.
+-- Implements ITransferProposal.
+template CashTransferProposal
+  with
+    newOwner: Party
+    cash: Cash       -- the Cash asset being proposed for transfer
+
+  where
+    -- Derived signatories from the Cash asset
     signatory (signatory cash)
-    observer newOwner 
+    observer newOwner
 
-    interface instance ITransferProposal for CashTransferProposal where 
-      view = VTransferProposal with 
-        newOwner = newOwner 
-        vasset = view $ toInterface @IAsset cash 
+    -- DAML CONCEPT: interface instance for ITransferProposal
+    interface instance ITransferProposal for CashTransferProposal where
+      view = VTransferProposal with
+        newOwner = newOwner
+        -- DAML CONCEPT: view $ toInterface @IAsset cash
+        -- 'toInterface @IAsset cash' — upcast Cash to IAsset using type application
+        -- 'view (...)' — call view on the IAsset to get VAsset
+        -- Combined: get the VAsset view of this Cash as an IAsset
+        vasset = view $ toInterface @IAsset cash
+
+      -- Return the Cash as an IAsset interface value
+      -- DAML CONCEPT: toInterface @IAsset cash
+      -- @IAsset is an explicit type application — specifies which interface to upcast to
+      -- (needed if Cash implements multiple interfaces)
       asset = toInterface @IAsset cash
 
 
----------------
-template Bond 
-  with 
-    issuer: Party 
-    owner: Party 
+-- ===== TEMPLATE: Bond =====
+-- A bond asset that ALSO implements IAsset.
+-- The swap logic can handle Bond exactly the same way as Cash
+-- because both implement IAsset — this is the power of interfaces!
+template Bond
+  with
+    issuer: Party
+    owner: Party
     obs: [Party]
-    quantity: Decimal 
-  where 
-    signatory [issuer, owner] 
-    observer obs 
+    quantity: Decimal
+  where
+    signatory [issuer, owner]
+    observer obs
 
-    interface instance IAsset for Bond where 
-      view = VAsset with 
-        assetType = "Bond"
-        .. 
+    interface instance IAsset for Bond where
+      view = VAsset with
+        assetType = "Bond"   -- only difference from Cash in the view
+        ..
       setOwner newOwner = toInterface (this with owner = newOwner)
       setObs newObs = toInterface (this with obs = newObs)
       setQuantity newQuantity = toInterface (this with quantity = newQuantity)
       transferTo newOwner = toInterface $ BondTransferProposal with bond = this; ..
-    
------------------------------------
 
-template BondTransferProposal 
-  with 
-    newOwner: Party 
-    bond: Bond 
 
-  where 
+-- ===== TEMPLATE: BondTransferProposal =====
+template BondTransferProposal
+  with
+    newOwner: Party
+    bond: Bond
+
+  where
     signatory (signatory bond)
-    observer newOwner 
+    observer newOwner
 
-    interface instance ITransferProposal for BondTransferProposal where 
-      view = VTransferProposal with 
-        newOwner = newOwner 
-        vasset = view $ toInterface @IAsset bond 
+    interface instance ITransferProposal for BondTransferProposal where
+      view = VTransferProposal with
+        newOwner = newOwner
+        vasset = view $ toInterface @IAsset bond
       asset = toInterface @IAsset bond

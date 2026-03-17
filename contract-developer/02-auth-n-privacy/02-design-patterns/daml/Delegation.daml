@@ -1,18 +1,45 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: Delegation
+-- PURPOSE: Demonstrates the Delegation pattern — allowing an
+--          agent to act on a principal's behalf within explicit limits.
+-- LEARNING FOCUS: Safe delegation in multi-party authorization
+-- ============================================================
+-- PATTERN: Delegation
+-- PROBLEM: Bob wants Bank to transfer his IOU to Alice, but Bank
+--          doesn't have Bob's authorization to exercise Bob's choices.
+-- SOLUTION:
+--   1. Bob creates a DelegationAgreement (principal=Bob, agent=Bank)
+--   2. Bank exercises DelegateTransfer on the agreement
+--   3. The exercise runs inside Bob's authorization → Bank can act
+-- WHY IT'S SAFE:
+--   - Bob explicitly creates the DelegationAgreement (his signature)
+--   - Bob is the signatory → the delegation is Bob's choice
+--   - Bank can only do what the DelegateTransfer choice allows
+--   - Bank CANNOT exceed Bob's authority (non-transitivity still applies)
+-- ============================================================
 module Delegation where
-import Daml.Script 
+import Daml.Script
 
+-- ===== TEMPLATE: Iou =====
+-- An IOU with disclosure support (discloseTo lets a third party see it).
 template Iou
     with
         issuer: Party
         owner: Party
-        discloseTo: Party
+        discloseTo: Party   -- a party who can see this IOU but is not a signatory
     where
         signatory issuer, owner
+
+        -- PRIVACY: discloseTo can see the IOU.
+        -- WHY: Bank needs to see the IOU to facilitate the transfer.
         observer discloseTo
 
+        -- ===== CHOICE: Transfer =====
+        -- Creates a TransferProposal for the recipient to accept.
+        -- Only owner can initiate a transfer.
         choice Transfer: ContractId TransferProposal
             with
                 recipient: Party
@@ -23,25 +50,47 @@ template Iou
                     iou = this
 
 
+-- ===== TEMPLATE: DelegationAgreement =====
+-- An explicit agreement where principal (Bob) grants agent (Bank)
+-- the ability to exercise Transfer on Bob's IOUs.
+-- PATTERN: This is the "delegation contract" that provides safe authorization.
 template DelegationAgreement
     with
-        principal: Party
-        agent: Party
+        principal: Party   -- the party granting authority (Bob)
+        agent: Party       -- the party receiving delegated authority (Bank)
     where
+        -- AUTH: Only the PRINCIPAL signs.
+        -- This is Bob saying "I grant Bank the right to transfer my IOUs."
+        -- The agent (Bank) does NOT need to sign the delegation itself.
         signatory principal
+
+        -- PRIVACY: Agent can see this delegation contract.
         observer agent
-        
-        -- nonconsuming choice DelegateTransfer: ContractId TransferProposal
+
+        -- ===== CHOICE: DelegateTransfer =====
+        -- AUTH: Agent is the controller — Bank exercises this.
+        -- MECHANISM: When Bank exercises DelegateTransfer, the Update runs
+        -- with the principal's (Bob's) AUTHORIZATION available.
+        -- WHY: DelegationAgreement is signed by Bob (the principal).
+        -- Exercising a choice on Bob's contract provides Bob's authorization.
+        -- This is the SAFE delegation mechanism.
+        --
+        -- WHAT BANK CAN DO: Call Transfer on the specified IOU.
+        -- WHAT BANK CANNOT DO: Anything outside this choice body.
+        --   (Non-transitivity: Bank cannot exercise arbitrary choices on Bob's contracts)
         choice DelegateTransfer: ContractId TransferProposal
-            with 
+            with
                 recipient: Party
-                iouCid: ContractId Iou
+                iouCid: ContractId Iou   -- Bank specifies WHICH IOU to transfer
             controller agent
             do
+                -- 'exercise iouCid Transfer' runs with principal's authorization
+                -- because DelegationAgreement's signatory is principal.
                 exercise iouCid Transfer with
                     recipient
 
 
+-- ===== TEMPLATE: TransferProposal =====
 template TransferProposal
     with
         recipient: Party
@@ -67,27 +116,35 @@ template TransferProposal
                 create iou
 
 
-
+-- ===== SCRIPT: test =====
 test = script do
-    bank <- allocateParty "Bank" 
-    alice <- allocateParty "Alice" 
-    bob <- allocateParty "Bob" 
+    bank <- allocateParty "Bank"
+    alice <- allocateParty "Alice"
+    bob <- allocateParty "Bob"
 
+    -- Bob creates an IOU (he's both issuer and owner, disclosed to bank)
     bobIouCid <- submit bob do
         createCmd Iou with
             issuer = bob
             owner = bob
             discloseTo = bank
-    
+
+    -- Bob creates a DelegationAgreement granting bank transfer authority.
+    -- AUTH: Only bob signs (he's the principal).
     bankAgent <- submit bob do
         createCmd DelegationAgreement with
             principal = bob
             agent = bank
 
+    -- Bank exercises DelegateTransfer to transfer Bob's IOU to Alice.
+    -- AUTH: Bank is agent (controller). Bob's authorization comes from
+    -- the DelegationAgreement (Bob is signatory of that contract).
     bankToAlice <- submit bank do
         exerciseCmd bankAgent DelegateTransfer with
             recipient = alice
             iouCid = bobIouCid
 
+    -- Alice accepts the transfer proposal.
+    -- Result: Alice now has the IOU.
     submit alice do
         exerciseCmd bankToAlice Accept

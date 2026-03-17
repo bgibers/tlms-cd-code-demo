@@ -1,6 +1,28 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: Test_AtomicSwap
+-- PURPOSE: End-to-end test for the AtomicSwap module.
+--          Demonstrates the full UTXO lifecycle (merge, split, transfer)
+--          followed by an atomic swap between Alice (Euros) and Bob (Dollars).
+-- LEARNING FOCUS: Asset lifecycle, SwapProposal creation and acceptance,
+--                 Asset_SetObservers for swap visibility, multi-currency swaps
+-- ============================================================
+-- WORKFLOW:
+--   UTXO OPERATIONS:
+--     1. Bank creates two USD assets (700 + 300)
+--     2. Bank merges them → 1000 USD
+--     3. Bank splits → 400 to Alice, 600 remains (as 600 remainder)
+--     4. Transfers: 400 to Alice, 600 to Bob
+--     5. Alice transfers her 400 to Bob (just to set up Bob with multiple assets)
+--
+--   ATOMIC SWAP:
+--     6. EU Bank creates 380 EUR for Alice
+--     7. Alice sets Bob as observer on her EUR asset (so Bob can verify it)
+--     8. Alice proposes swap: her 380 EUR for Bob's 400 USD
+--     9. Bob accepts → both transfers happen atomically
+-- ============================================================
 module Test_AtomicSwap where
 
 import Setup
@@ -10,28 +32,36 @@ import Daml.Script
 testAtomicSwap = script do
   (testParties@TestParties{..}) <- setupTestParties
 
+  -- ===== UTXO LIFECYCLE: Merge and Split =====
+
+  -- Bank creates two separate USD asset contracts
   ubAssetCid1 <- submit ub do
-    createCmd Asset with 
+    createCmd Asset with
       issuer = ub
       owner = ub
       amount = 700.0
       observers = []
 
   ubAssetCid2 <- submit ub do
-    createCmd Asset with 
+    createCmd Asset with
       issuer = ub
       owner = ub
       amount = 300.0
       observers = []
 
+  -- DAML CONCEPT: Asset_Merge — combine two UTXOs into one
+  -- Archives ubAssetCid1 and ubAssetCid2, creates one new 1000.0 asset
   mergedUbAssetCid <- submit ub do
     exerciseCmd ubAssetCid1 Asset_Merge with
       otherAssetCid = ubAssetCid2
 
+  -- DAML CONCEPT: Asset_Split — divide one UTXO into two
+  -- Returns SplitResult with .splitAsset (400.0) and .remainder (600.0)
   splittedUbAssetRecord <- submit ub do
     exerciseCmd mergedUbAssetCid Asset_Split with
       splitAmount = 400.0
 
+  -- Bank transfers 400.0 to Alice
   ubToAliceCid <- submit ub do
     exerciseCmd splittedUbAssetRecord.splitAsset Asset_Transfer with
       recipient = alice
@@ -39,6 +69,7 @@ testAtomicSwap = script do
   aliceAssetCid <- submit alice do
     exerciseCmd ubToAliceCid AssetTransferProposal_Accept
 
+  -- Bank transfers 600.0 to Bob
   ubToBobCid <- submit ub do
     exerciseCmd splittedUbAssetRecord.remainder Asset_Transfer with
       recipient = bob
@@ -46,15 +77,18 @@ testAtomicSwap = script do
   bobAssetCid1 <- submit bob do
     exerciseCmd ubToBobCid AssetTransferProposal_Accept
 
+  -- Alice transfers her 400.0 USD to Bob
+  -- (After this, Bob has 1000.0 USD total; used to have one for the swap)
   aliceToBobCid <- submit alice do
     exerciseCmd aliceAssetCid Asset_Transfer with
       recipient = bob
-  
+
   bobAssetCid2 <- submit bob do
     exerciseCmd aliceToBobCid AssetTransferProposal_Accept
 
 -- ===================================== ATOMIC SWAP TEST =====================================
 
+  -- EU Bank issues 380.0 EUR to itself
   ebAssetCid <- submit eb do
     createCmd Asset with
       issuer = eb
@@ -62,6 +96,7 @@ testAtomicSwap = script do
       amount = 380.0
       observers = []
 
+  -- EU Bank transfers to Alice via proposal-accept
   ebToAliceCid <- submit eb do
     exerciseCmd ebAssetCid Asset_Transfer with
       recipient = alice
@@ -69,10 +104,18 @@ testAtomicSwap = script do
   aliceEuroCid <- submit alice do
     exerciseCmd ebToAliceCid AssetTransferProposal_Accept
 
+  -- DAML CONCEPT: Asset_SetObservers — make Bob an observer
+  -- Without this, Bob cannot see Alice's EUR contract.
+  -- In a swap, Bob must be able to verify that Alice's offered asset exists
+  -- and matches the spec before accepting. Adding him as observer enables this.
+  -- WHY privacy: by default, Alice's EUR is private to her (and EU Bank).
   aliceEuroWithObsCid <- submit alice do
     exerciseCmd aliceEuroCid Asset_SetObservers with
       newObservers = [bob]
 
+  -- DAML CONCEPT: Create SwapProposal
+  -- Alice proposes: I'll give 380 EUR (aliceEuroWithObsCid) for 400 USD from Bob
+  -- requestedAsset carries the FULL spec of what Alice wants (issuer, owner, amount, observers)
   aliceSwapBobCid <- submit alice do
     createCmd SwapProposal with
       initiator = alice
@@ -84,9 +127,16 @@ testAtomicSwap = script do
         amount = 400.0
         observers = []
 
+  -- DAML CONCEPT: SwapProposal_Accept — ATOMIC settlement
+  -- Bob exercises with his 400 USD (bobAssetCid2, which is exactly 400.0 from the earlier split)
+  -- Internally:
+  --   1. fetch bobAssetCid2 → verify it matches requestedAsset spec
+  --   2. exercise offerCid Asset_Transfer with recipient = bob → creates proposal for Bob
+  --   3. exercise bobAssetCid2 Asset_Transfer with recipient = alice → creates proposal for Alice
+  --   4. both AssetTransferProposal_Accept exercised in same transaction
+  -- Result: Alice has 400 USD, Bob has 380 EUR — atomically.
   submit bob do
     exerciseCmd aliceSwapBobCid SwapProposal_Accept with
       assetCid = bobAssetCid2
 
   pure ()
-

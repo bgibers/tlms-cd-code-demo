@@ -1,11 +1,32 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: ReturningCustomException
+-- PURPOSE: Demonstrates an advanced pattern: catching an exception
+--          inside a nonconsuming choice and converting it to an
+--          Either return value. Shows why this pattern is tricky
+--          and why the commented-out approach doesn't work.
+-- LEARNING FOCUS: nonconsuming + manual archive, Either return from choice,
+--                 catch-and-rethrow, exception as return value limitations
+-- ============================================================
+-- ADVANCED PATTERN: Exception as Either
+-- Goal: Return `Either ChangeFailed (ContractId SocialNetworkUser)` from ChangeAlias.
+-- Problem: `throw` in Daml does NOT return a value — it aborts execution.
+-- So `result <- throw ...` doesn't work (throw never produces a value).
+--
+-- WHY this is in the course:
+-- It shows a common misunderstanding: exceptions are NOT values in Daml.
+-- Unlike some languages where you can "catch and return the error object",
+-- in Daml `throw` is a terminal operation within the catch block.
+-- The commented-out section shows the failed attempt.
+-- ============================================================
 module ReturningCustomException where
 
 import Daml.Script
 import DA.Exception
 
+-- ===== TEMPLATE: SocialNetworkUser =====
 template SocialNetworkUser
     with
         username: Party
@@ -15,8 +36,8 @@ template SocialNetworkUser
         signatory username
         observer following
 
-        key username : Party 
-        maintainer key 
+        key username : Party
+        maintainer key
 
         ensure alias /= ""
 
@@ -24,42 +45,72 @@ template SocialNetworkUser
             with
                 userToFollow: Party
             controller username
-            do       
+            do
                 assertMsg "You cannot follow yourself" (userToFollow /= username)
                 assertMsg "You cannot follow the same user twice" (notElem userToFollow following)
                 create this with following = userToFollow :: following
 
+        -- DAML CONCEPT: nonconsuming choice with manual archive + Either return
+        -- Goal: catch PreconditionFailed, return Left (custom exception) instead of crashing.
+        --
+        -- The pattern:
+        --   1. nonconsuming — contract is NOT automatically archived
+        --   2. archive self  — manually archive the current contract
+        --   3. create ...    — create the new contract (may throw PreconditionFailed)
+        --   4. catch the exception and throw a custom exception
+        --
+        -- NOTE: The attempt to return Left directly (see commented section) FAILS
+        -- because `throw` is a terminal operation — it doesn't produce a value.
+        -- The throw re-propagates the exception; it's caught by the script's submit.
         nonconsuming choice ChangeAlias: Either ChangeFailed (ContractId SocialNetworkUser)
             with
                 newAlias: Text
             controller username
             do
                 try do
-                    archive self
-                    cid <- create this with alias = newAlias 
-                    let result = Right cid 
-                    pure result
+                    archive self   -- DAML CONCEPT: manually archive using `self` (current ContractId)
+                    cid <- create this with alias = newAlias  -- throws PreconditionFailed if alias = ""
+                    let result = Right cid   -- Success: wrap in Right
+                    pure result              -- Return the Right value
                 catch
+                    -- DAML CONCEPT: catch PreconditionFailed
+                    -- PreconditionFailed is thrown when `ensure` clause is violated.
+                    -- The `_` ignores the exception's message field.
                     (PreconditionFailed _) -> do
-                        throw ChangeFailed with 
+                        -- Re-throw as a more informative custom exception
+                        throw ChangeFailed with
                             fieldName = "alias"
                             details = "cannot be an empty string"
-                        
-                        -- result <- throw ChangeFailed with 
+
+                        -- WHY the following doesn't work (commented out):
+                        -- `result <- throw ChangeFailed with ...`
+                        -- `throw` aborts — it never produces a value for `result`.
+                        -- The type system wouldn't even accept this.
+                        -- `Left result` would need a `result : ChangeFailed` value.
+
+                        -- result <- throw ChangeFailed with
                         --     fieldName = "alias"
                         --     details = "cannot be an empty string"
                         -- pure $ Left result
 
 
--- Custom Exception
+-- ===== CUSTOM EXCEPTION DEFINITION =====
+-- DAML CONCEPT: exception keyword
+-- Defines a new exception type with structured fields.
+-- `message` clause provides the human-readable string for `message e`.
 exception ChangeFailed
     with
-        fieldName: Text
-        details: Text
+        fieldName: Text   -- which field caused the failure
+        details: Text     -- why it failed
     where
         message "Provided input is invalid."
+        -- NOTE: `message` returns a fixed string. The fieldName/details
+        -- fields are accessible on the caught value but not shown in the default message.
 
 
+-- ===== TEST: Exercises the ChangeAlias choice =====
+-- INTENTIONAL: newAlias = "" triggers PreconditionFailed → caught → thrown as ChangeFailed
+-- The submit call will see ChangeFailed (not PreconditionFailed).
 test = script do
     alice <- allocateParty "Alice"
     bob <- allocateParty "Bob"
@@ -69,7 +120,9 @@ test = script do
             username = alice
             following = []
             alias = "aliceAlias"
-    
-    submit alice do 
-        exerciseCmd aliceCid ChangeAlias with newAlias = ""
 
+    -- DAML CONCEPT: When ChangeAlias throws ChangeFailed, submit sees it as a failure.
+    -- The Either return type is only used for the SUCCESS path.
+    -- If an exception escapes the try block, submit fails.
+    submit alice do
+        exerciseCmd aliceCid ChangeAlias with newAlias = ""

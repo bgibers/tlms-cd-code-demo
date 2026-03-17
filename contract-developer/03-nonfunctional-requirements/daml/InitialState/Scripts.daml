@@ -1,3 +1,21 @@
+-- ============================================================
+-- MODULE: InitialState.Scripts
+-- PURPOSE: Initial state setup for the non-functional requirements section.
+--          Creates parties, users, and distributes Position contracts.
+--          This is the "before upgrade" state that Upgrade1/2/3 build on.
+-- LEARNING FOCUS: createUser, grantUserRights, submitUser,
+--                 replicateA_, forA_ for batch operations, TestUsers pattern
+-- ============================================================
+-- PATTERN: Two-level setup
+-- Level 1: Parties (allocatePartyWithHint) — ledger identities
+-- Level 2: Users (createUser) — application-level identities with rights
+--
+-- Why separate parties and users?
+-- Parties: The fundamental authorization unit. Every contract has signatories/observers that are Parties.
+-- Users: Application-level identities. A user can hold MULTIPLE party rights (CanActAs).
+-- In production, your app authenticates Users (with JWT tokens), not raw Parties.
+-- Users are associated with Parties via rights (CanActAs = "submit as this party").
+-- ============================================================
 module InitialState.Scripts where
 
 import InitialState.Cash
@@ -6,6 +24,7 @@ import Daml.Script
 import DA.Action
 import DA.Foldable (forA_)
 
+-- ===== TEST FIXTURES =====
 data TestParties = TestParties with
   pBank : Party
   pAlice : Party
@@ -16,6 +35,7 @@ data TestUsers = TestUsers with
   uAlice : UserId
   uBob : UserId
 
+-- ===== PARTY INITIALIZATION =====
 initParties : Script TestParties
 initParties = do
   let allocate t = allocatePartyWithHint t (PartyIdHint t)
@@ -25,16 +45,24 @@ initParties = do
 
   return (TestParties with ..)
 
+-- ===== USER INITIALIZATION =====
+-- DAML CONCEPT: createUser and grantUserRights
+-- createUser takes a User record (with userId and optional primaryParty)
+-- and a list of rights (CanActAs, CanReadAs).
+-- `CanActAs p` lets the user submit transactions as party `p`.
 initUsers : TestParties -> Script TestUsers
 initUsers TestParties{..} = do
-  let 
+  let
+    -- DAML CONCEPT: Local helper function `makeUser`
+    -- Packages the pattern: validateUserId → create User record → createUser
+    -- Returns the UserId for later use in submitUser calls.
     makeUser id p rs = do
-      uid <- validateUserId id
-      let 
-        u = User with 
+      uid <- validateUserId id  -- Validates format of user ID string
+      let
+        u = User with
           userId = uid
-          primaryParty = Some p
-      createUser u (CanActAs p :: rs)
+          primaryParty = Some p  -- Default party for this user
+      createUser u (CanActAs p :: rs)  -- Grant CanActAs + any extra rights
       return uid
   uBank <- makeUser "bank" pBank []
   uAlice <- makeUser "alice" pAlice []
@@ -42,23 +70,30 @@ initUsers TestParties{..} = do
 
   return (TestUsers with ..)
 
+-- ===== CASH INITIALIZATION =====
+-- Creates Position contracts and distributes them via TransferProposal.
+-- Uses submitUser (submits as the user's primary party) rather than submit (submits as a party directly).
 initCash : Script (TestParties, TestUsers)
 initCash = do
   ps@TestParties{..} <- initParties
   us@TestUsers{..} <- initUsers ps
 
-  -- Issue some cash in the form of transfer proposals.
+  -- Template for the base position (quantity=1.0 each)
   let position = Position with
         issuer = pBank
         owner = pBank
         obs = []
         quantity = 1.0
 
+  -- DAML CONCEPT: submitUser
+  -- Equivalent to `submit (user's primary party) do ...`
+  -- Allows application-level authentication: the user's JWT grants the right to submit.
+  -- replicateA_ 5: create 5 transfer proposals (5 separate Position contracts for Alice)
   -- 5 positions of $1 for Alice
   replicateA_ 5 $ submitUser uBank do
     createCmd TransferProposal with
         position
-        newOwner = pAlice 
+        newOwner = pAlice
 
   -- 3 positions of $1 for Bob
   replicateA_ 3 $ submitUser uBank do
@@ -66,14 +101,17 @@ initCash = do
         position
         newOwner = pBob
 
-  -- Alice accepts her transfer proposals
+  -- Alice accepts all her transfer proposals
+  -- DAML CONCEPT: query @T party — returns [(ContractId T, T)]
+  -- Each tuple is (contractId, contractData).
+  -- `p._1` accesses the first element of the tuple (the ContractId).
   aliceProposals <- query @TransferProposal pAlice
-  forA_ aliceProposals (\p -> submit pAlice do 
+  forA_ aliceProposals (\p -> submit pAlice do
     exerciseCmd p._1 Accept)
 
   -- Bob accepts his transfer proposals
-  bobProposals <- query @TransferProposal pBob  
-  forA_ bobProposals (\p -> submit pBob do 
+  bobProposals <- query @TransferProposal pBob
+  forA_ bobProposals (\p -> submit pBob do
     exerciseCmd p._1 Accept)
-  
+
   return (ps, us)

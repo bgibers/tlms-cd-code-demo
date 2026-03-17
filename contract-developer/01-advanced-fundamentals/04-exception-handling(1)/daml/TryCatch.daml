@@ -1,9 +1,21 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: TryCatch
+-- PURPOSE: Demonstrates try-catch exception handling in Daml,
+--          catching the built-in PreconditionFailed exception.
+-- LEARNING FOCUS: Exception handling, transaction rollback prevention
+-- ============================================================
+-- KEY INSIGHT: Without try-catch, a PreconditionFailed exception
+-- would ABORT THE ENTIRE TRANSACTION. With try-catch, you can
+-- recover gracefully and continue.
+-- ============================================================
 module TryCatch where
 
 import Daml.Script
+-- DAML CONCEPT: DA.Exception import
+-- Provides access to exception types and PreconditionFailed
 import DA.Exception
 
 
@@ -16,8 +28,8 @@ template SocialNetworkUser
         signatory username
         observer following
 
-        key username : Party 
-        maintainer key 
+        key username : Party
+        maintainer key
 
         ensure alias /= ""
 
@@ -25,40 +37,65 @@ template SocialNetworkUser
             with
                 userToFollow: Party
             controller username
-            do       
+            do
                 assertMsg "You cannot follow yourself" (userToFollow /= username)
                 assertMsg "You cannot follow the same user twice" (notElem userToFollow following)
                 create this with following = userToFollow :: following
 
+        -- ===== CHOICE: ChangeAlias (with try-catch) =====
+        -- DAML CONCEPT: nonconsuming + try-catch
+        -- We use nonconsuming so we can manually control archiving inside the try block.
+        -- The try-catch catches the PreconditionFailed from the 'ensure alias /= ""' check.
+        --
+        -- WHY nonconsuming here: if we used consuming, the contract would be archived
+        -- BEFORE the body runs. If create fails, we'd lose the contract entirely!
+        -- nonconsuming + manual archive lets us recover from create failures.
         nonconsuming choice ChangeAlias: ContractId SocialNetworkUser
             with
                 newAlias: Text
             controller username
             do
+                -- DAML CONCEPT: try-catch
+                -- try do ... catches exceptions from the block.
+                -- catch lists handlers: (ExceptionType pat) -> recovery body
+                -- If no exception: returns the value from the try block
+                -- If exception matches: runs the handler
+                -- If exception doesn't match: propagates up (unhandled)
                 try do
+                    -- Archive self INSIDE the try block.
+                    -- If create fails, this archive is ROLLED BACK (atomicity!).
                     archive self
-                    create this with alias = newAlias 
+                    -- This will throw PreconditionFailed if newAlias == ""
+                    -- because the 'ensure alias /= ""' check runs at creation.
+                    create this with alias = newAlias
                 catch
+                    -- DAML CONCEPT: PreconditionFailed
+                    -- Thrown when an 'ensure' clause is violated during contract creation.
+                    -- The _ pattern ignores the exception value (we don't need its details).
                     (PreconditionFailed _) -> do
-                        -- pure self 
+                        -- DAML CONCEPT: trace
+                        -- trace message action — prints message to the IDE log then runs action.
+                        -- NOTE: 'trace' is for debugging only, NOT for production code.
+                        -- It prints to console/log and does NOT affect transaction validity.
                         trace "Alias cannot be an empty string. Try again." (pure self)
+                        -- 'pure self' returns the ORIGINAL contract ID unchanged.
+                        -- The caller gets back the old contract — no change was made.
 
+                -- ALTERNATIVE: Return Either instead of using trace (better for callers)
+                -- nonconsuming choice ChangeAlias: Either Text (ContractId SocialNetworkUser)
+                --     ...
+                --     try do
+                --         archive self
+                --         cid <- create this with alias = newAlias
+                --         pure (Right cid)            -- success: return new ContractId
+                --     catch
+                --         (PreconditionFailed _) -> do
+                --             pure (Left "Alias cannot be empty")   -- failure: return error message
 
-        -- nonconsuming choice ChangeAlias: Either Text (ContractId SocialNetworkUser)
-        --     with
-        --         newAlias: Text
-        --     controller username
-        --     do
-        --         try do
-        --             archive self
-        --             cid <- create this with alias = newAlias 
-        --             let result = Right cid 
-        --             pure result
-        --         catch
-        --             (PreconditionFailed _) -> do
-        --                 let result = Left "Alias cannot be an empty string. Try again."
-        --                 pure result                        
-
+                -- ALTERNATIVE: Catch with variable binding to inspect the exception
+                -- (PreconditionFailed ea) -> ...  ea holds the exception value
+                -- (e : PreconditionFailed) -> ... e is typed, use 'message e' for text
+                -- (e : AnyException) -> ...       catch ANY exception as a last resort
 
 
 test = script do
@@ -70,28 +107,10 @@ test = script do
             username = alice
             following = []
             alias = "aliceAlias"
-    
-    submit alice do 
+
+    -- Exercise ChangeAlias with an EMPTY alias (violates ensure clause)
+    -- WITHOUT try-catch: this would FAIL and abort the script
+    -- WITH try-catch: gracefully caught, returns original contract
+    submit alice do
         exerciseCmd aliceCid ChangeAlias with newAlias = ""
-
-
-
-
-    -- submit alice do 
-    --     exerciseCmd aliceCid ChangeAlias with newAlias = "ExpertDamler"
-
-
-                    -- (PreconditionFailed _) -> do
-                    --     let result = Left "Alias cannot be an empty string. Try again."
-                    --     pure result
-
-                    -- (PreconditionFailed ea) -> do
-                    --     debug ea 
-                    --     let result = Left ea
-                    --     pure result
-
-
-                    -- (e : PreconditionFailed) -> do
-                    --     debug $ message e 
-                    --     let result = Left $ message e 
-                    --     pure result
+    -- Result: aliceCid still points to a valid contract (unchanged)

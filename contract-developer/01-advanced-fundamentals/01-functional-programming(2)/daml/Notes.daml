@@ -1,53 +1,73 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: Notes
+-- PURPOSE: Illustrates a subtle naming edge case in Daml's type system.
+--          Demonstrates that type names and constructor names are in
+--          DIFFERENT namespaces — they can be the same Text without conflict.
+-- LEARNING FOCUS: Type constructors vs data constructors, namespace separation
+-- ============================================================
 module Notes where
 
 import Daml.Script
 
-
+-- ===== EDGE CASE 1: Constructor named same as a built-in type =====
+-- DAML CONCEPT: Type constructor vs data constructor namespaces
+-- `data Confusing = Int` defines a NEW type named `Confusing` with a
+-- single data constructor named `Int`.
+-- This `Int` constructor is NOT the same as Daml's built-in `Int` type!
+-- The TYPE namespace and the CONSTRUCTOR namespace are separate.
+-- WHY this matters: Reading code, you must track whether `Int` refers to
+-- a type position (the built-in integer) or a value position (this constructor).
+-- Here: `c : Confusing` and `c = Int` — Int is a CONSTRUCTOR, not the type.
 data Confusing = Int
     deriving (Eq, Show)
 
-testC = script do 
-    let 
-        c : Confusing 
-        c = Int
-    
-    debug $ c
+testC = script do
+    let
+        c : Confusing   -- type annotation: c is of type Confusing (our new type)
+        c = Int         -- data constructor: Int here is the constructor of Confusing
+
+    debug $ c  -- Prints: Int (the constructor name as a string)
 
 
 
+-- ===== EDGE CASE 2: Type and constructor with same name (standard pattern) =====
+-- DAML CONCEPT: Nominal types — type name and constructor name can match
+-- This is the normal case. `data Foo = Foo` means:
+--   - TYPE `Foo` (how you annotate variables: `x : Foo`)
+--   - CONSTRUCTOR `Foo` (how you build values: `x = Foo`)
+-- Both are named Foo — this is idiomatic Daml/Haskell for simple unit-like types.
 data Foo = Foo
     deriving (Eq, Show)
 
-testF = script do 
-    let 
-        f : Foo 
+testF = script do
+    let
+        f : Foo
         f = Foo
-    
-    debug $ f
 
+    debug $ f  -- Prints: Foo
 
+-- ===== NOTE: Record with empty braces =====
+-- `data Foo = Foo {}` is equivalent to `data Foo = Foo` (no fields).
+-- The `{}` is optional syntax for an empty record. Identical behavior.
 
-data Foo = Foo {}
-    deriving (Eq, Show)
+-- data Foo = Foo {}   -- same as: data Foo = Foo
+--     deriving (Eq, Show)
 
-testF = script do 
-    let 
-        f : Foo 
-        f = Foo
-    
-    debug $ f
+-- ===== EDGE CASE 3: Constructor carrying a Unit value =====
+-- DAML CONCEPT: `data Foo = Foo ()` vs `data Foo = Foo`
+-- `Foo ()` takes a unit argument — you must pass `()` to construct it.
+-- `Foo` (no args) is a nullary constructor — no argument needed.
+-- DIFFERENCE: `f = Foo` vs `f = Foo ()` — the latter wraps unit explicitly.
+-- Unit `()` is useful as a placeholder when you need a type but carry no data.
 
+-- data Foo = Foo ()
+--     deriving (Eq, Show)
 
-
-data Foo = Foo ()
-    deriving (Eq, Show)
-
-testF = script do 
-    let 
-        f : Foo 
-        f = Foo ()
-    
-    debug $ f
+-- testF = script do
+--     let
+--         f : Foo
+--         f = Foo ()    -- must pass unit: ()
+--     debug $ f

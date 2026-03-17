@@ -1,29 +1,67 @@
-module Upgrade2.AdditionalRules where 
+-- ============================================================
+-- MODULE: Upgrade2.AdditionalRules
+-- PURPOSE: Demonstrates another upgrade pattern: adding BEHAVIOR to
+--          existing contracts without modifying them directly.
+--          The AdditionalRules contract acts as a "rule contract" that
+--          lets owners set observers on their Position contracts.
+-- LEARNING FOCUS: Delegation via rule contracts, nonconsuming fetch-then-archive,
+--                 DA.Assert `===` operator, bankReader reader pattern
+-- ============================================================
+-- PATTERN: Rule Contract (Behavior Extension Without Schema Change)
+-- Problem: We want to add a SetObservers capability to Position contracts,
+--          but we can't modify the Position template directly (it's deployed).
+-- Solution: Create an AdditionalRules contract that:
+--   1. The bank creates and owns (proving the bank endorses these rules)
+--   2. Provides choices that operate ON Position contracts
+--   3. Users exercise the rules contract to perform allowed operations
+--
+-- This is the "smart contract" equivalent of adding a policy layer.
+-- The existing Position template is UNCHANGED.
+-- The new functionality is in a SEPARATE template.
+--
+-- WHY nonconsuming?
+-- The rules contract should persist — it's a standing rule, not a one-time action.
+-- Each SetObservers call uses the SAME rules contract.
+-- ============================================================
+module Upgrade2.AdditionalRules where
 
-import InitialState.Cash 
+import InitialState.Cash
 import DA.Assert
 
+-- ===== TEMPLATE: AdditionalRules =====
 template AdditionalRules
   with
-    bank : Party
-    bankReader : Party
+    bank : Party       -- The bank that creates/owns the rules contract
+    bankReader : Party -- A special party with read access (e.g., regulator, auditor)
   where
-    signatory bank
-    observer bankReader
+    signatory bank     -- Bank authorizes the rules (they set the policy)
+    observer bankReader -- BankReader can see the rules exist
 
+    -- DAML CONCEPT: nonconsuming choice that modifies ANOTHER contract
+    -- SetObservers doesn't archive AdditionalRules itself — it persists.
+    -- Instead it archives and recreates the POSITION contract.
+    -- This is the "rule" pattern: a persistent contract with operational choices.
     nonconsuming choice SetObservers : ContractId Position
       with
-        owner : Party
-        positionCid : ContractId Position
-        new_obs : [Party]
-      controller owner
+        owner : Party              -- Who owns the Position being modified
+        positionCid : ContractId Position  -- Which Position to add observers to
+        new_obs : [Party]          -- New observers to set
+      controller owner             -- The OWNER of the position controls this (not the bank!)
       do
+        -- DAML CONCEPT: fetch — reads contract data without archiving it
+        -- After fetch, positionCid is still active on the ledger.
         position <- fetch positionCid
-        owner === position.owner
-        bank === position.issuer
 
+        -- DAML CONCEPT: DA.Assert `===` operator
+        -- `x === y` is equivalent to `assertMsg "..." (x == y)`
+        -- It throws GeneralError if x /= y.
+        -- More concise than `assertMsg "owner does not match" (owner == position.owner)`
+        -- WHY validate here: prevents one user from modifying another user's position.
+        owner === position.owner    -- Caller must be the position owner
+        bank === position.issuer    -- Position must be from THIS bank's rules contract
+
+        -- DAML CONCEPT: Manual archive + create (consuming pattern for a target contract)
+        -- positionCid is archived, new contract created with updated obs list.
+        -- The nonconsuming choice doesn't archive AdditionalRules — only the Position.
         archive positionCid
         create position with obs = new_obs
-
-
-        

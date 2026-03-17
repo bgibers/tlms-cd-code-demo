@@ -1,6 +1,17 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: ChoiceTypes
+-- PURPOSE: Demonstrates a CONSUMING choice — the default choice type.
+-- LEARNING FOCUS: Basic choice structure and consuming semantics
+-- ============================================================
+-- CHOICE TYPES IN DAML:
+--   (default)      consuming     — archives contract BEFORE running body
+--   preconsuming   consuming     — archives contract BEFORE running body (explicit)
+--   postconsuming  consuming     — archives contract AFTER running body
+--   nonconsuming   non-archiving — contract STAYS active after body runs
+-- ============================================================
 module ChoiceTypes where
 
 
@@ -13,17 +24,49 @@ template SocialNetworkUser
         signatory username
         observer following
 
-        key username : Party 
-        maintainer key 
+        key username : Party
+        maintainer key
 
         ensure alias /= ""
 
+        -- ===== CHOICE: Follow =====
+        -- DAML CONCEPT: Consuming choice (default — no keyword needed)
+        -- When exercised, this contract IS ARCHIVED (deleted).
+        -- The choice body must create a replacement contract if desired.
+        -- RETURN TYPE: ContractId SocialNetworkUser (the new contract after update)
+        --
+        -- WHY consuming: Follow modifies the 'following' list. Since contracts are
+        -- IMMUTABLE once created, we must archive old + create new to "update" state.
         choice Follow: ContractId SocialNetworkUser
             with
+                -- DAML CONCEPT: Choice argument
+                -- Arguments are passed to the choice at exercise time.
+                -- They are NOT stored in the contract — they're ephemeral.
                 userToFollow: Party
+            -- DAML CONCEPT: controller
+            -- The controller specifies WHO can exercise this choice.
+            -- Here: only username (the user themselves) can follow someone.
+            -- If multiple parties needed, use: controller username, otherParty
             controller username
-            do       
+            do
+                -- DAML CONCEPT: assertMsg
+                -- assertMsg "message" condition
+                -- Aborts the transaction with the message if condition is False.
+                -- Like assert but with a custom error message.
                 assertMsg "You cannot follow yourself" (userToFollow /= username)
+
+                -- DAML CONCEPT: notElem
+                -- notElem x xs = True if x is NOT in list xs
+                -- Prevents duplicate follows.
                 assertMsg "You cannot follow the same user twice" (notElem userToFollow following)
-                
+
+                -- DAML CONCEPT: :: (cons operator)
+                -- userToFollow :: following = prepend userToFollow to the following list
+                -- Creates a new list with userToFollow at the front.
+                -- WHY: Lists are immutable; we build a new one.
+                --
+                -- DAML CONCEPT: create this with <field> = <value>
+                -- 'this' = current contract's data record
+                -- Creates a new contract with the same data EXCEPT following is updated.
+                -- The old contract is archived automatically (consuming choice).
                 create this with following = userToFollow :: following

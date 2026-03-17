@@ -1,6 +1,18 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: HandlingCustomException
+-- PURPOSE: Demonstrates catching custom exceptions with multiple
+--          handlers and returning Either from choices.
+-- LEARNING FOCUS: Multiple catch handlers, AnyException, Either return
+-- ============================================================
+-- CATCH HANDLER PATTERNS:
+--   (ChangeFailed f d)   — destructure fields directly: f=fieldName, d=details
+--   (e: ChangeFailed)    — bind exception to 'e', access via e.fieldName, message e
+--   (e: AnyException)    — catch-all: catches ANY exception (use as last resort)
+-- Handlers are checked top-to-bottom — first match wins.
+-- ============================================================
 module HandlingCustomException where
 
 import Daml.Script
@@ -15,8 +27,8 @@ template SocialNetworkUser
         signatory username
         observer following
 
-        key username : Party 
-        maintainer key 
+        key username : Party
+        maintainer key
 
         ensure alias /= ""
 
@@ -24,43 +36,62 @@ template SocialNetworkUser
             with
                 userToFollow: Party
             controller username
-            do       
+            do
                 assertMsg "You cannot follow yourself" (userToFollow /= username)
                 assertMsg "You cannot follow the same user twice" (notElem userToFollow following)
                 create this with following = userToFollow :: following
 
+        -- ===== CHOICE: ChangeAlias (returning Either, catching custom exception) =====
+        -- DAML CONCEPT: Choice returning Either ErrorType SuccessType
+        -- By returning Either, the CALLER can handle success vs failure without
+        -- try-catch at their call site. Very composable.
+        -- WHY: The caller knows whether it succeeded without catching exceptions.
         nonconsuming choice ChangeAlias: Either Text (ContractId SocialNetworkUser)
             with
                 newAlias: Text
             controller username
             do
                 try do
-                    if (newAlias == "") then do 
-                        throw ChangeFailed with 
+                    if (newAlias == "") then do
+                        -- DAML CONCEPT: throw in try block
+                        -- Throw transitions control to the matching catch handler.
+                        throw ChangeFailed with
                             fieldName = "alias"
                             details = "cannot be an empty string"
                     else do
                         archive self
-                        cid <- create this with alias = newAlias 
-                        let result = Right cid 
+                        cid <- create this with alias = newAlias
+                        let result = Right cid   -- Success: wrap ContractId in Right
                         pure result
                 catch
+                    -- HANDLER 1: Destructuring pattern — bind fields directly
+                    -- 'f' = fieldName, 'd' = details
                     (ChangeFailed f d) -> do
                         let result = Left $ f <> " " <> d
                         pure result
 
+                    -- HANDLER 2: Typed binding — bind exception to 'e'
+                    -- Access via 'e.fieldName', 'e.details', or 'message e'
+                    -- message e: returns the text from the 'where message "..."' clause
+                    -- DAML CONCEPT: Note that multiple handlers for the same exception type
+                    -- are all valid — they're shown here for educational purposes.
+                    -- In practice, pick ONE style per catch block.
                     (e: ChangeFailed) -> do
-                        debug e 
-                        debug $ message e
+                        debug e           -- debug prints the exception to the IDE log
+                        debug $ message e -- prints "Provided input is invalid."
                         let result = Left $ e.fieldName <> " " <> e.details
                         pure result
 
+                    -- HANDLER 3: AnyException — catches everything else
+                    -- message e works on ANY exception (it's from the Exception typeclass)
+                    -- WHY: Prevents unknown exceptions from aborting the transaction.
+                    -- Use sparingly — hiding unexpected errors is dangerous in production.
                     (e: AnyException) -> do
                         let result = Left $ message e
                         pure result
 
 
--- Custom Exception
+-- DAML CONCEPT: exception definition
 exception ChangeFailed
     with
         fieldName: Text
@@ -78,14 +109,9 @@ test = script do
             username = alice
             following = []
             alias = "aliceAlias"
-    
-    submit alice do 
+
+    -- Returns Either Text (ContractId SocialNetworkUser)
+    -- With newAlias = "", this returns Left "alias cannot be an empty string"
+    -- The script does NOT fail — the exception is caught and returned as Left.
+    submit alice do
         exerciseCmd aliceCid ChangeAlias with newAlias = ""
-
-
-
-
-
-
-
-

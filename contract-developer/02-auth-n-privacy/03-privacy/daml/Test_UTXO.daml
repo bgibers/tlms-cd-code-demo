@@ -1,6 +1,23 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: Test_UTXO
+-- PURPOSE: End-to-end test for the UTXO module.
+--          Demonstrates merge, split, and transfer operations
+--          in the pure UTXO model (no partial transfers, unlike AccountBalance).
+-- LEARNING FOCUS: UTXO pattern, SplitResult record access, asset lifecycle
+-- ============================================================
+-- WORKFLOW:
+--   1. Bank creates two asset contracts: 700.0 and 300.0
+--   2. Bank merges them → single 1000.0 asset
+--   3. Bank splits 1000.0 → 400.0 (to Alice) + 600.0 remainder
+--   4. Bank transfers 400.0 to Alice via proposal
+--   5. Bank transfers 600.0 remainder to Bob via proposal
+--   6. Alice transfers her 400.0 to Bob
+--   Final state: Bob has 600 + 400 = 1000.0 (bobTotalAssetCid after merge would be 1000)
+--   Actually: Bob has TWO separate contracts (600.0 and 400.0) unless merged.
+-- ============================================================
 module Test_UTXO where
 
 import Setup
@@ -10,26 +27,37 @@ import Daml.Script
 testUTXO = script do
     (testParties@TestParties{..}) <- setupTestParties
 
+    -- Bank creates two separate UTXO contracts
     ubAssetCid1 <- submit ub do
-      createCmd Asset with 
+      createCmd Asset with
         issuer = ub
         owner = ub
         amount = 700.0
 
     ubAssetCid2 <- submit ub do
-      createCmd Asset with 
+      createCmd Asset with
         issuer = ub
         owner = ub
         amount = 300.0
 
+    -- DAML CONCEPT: UTXO Merge
+    -- Archives BOTH ubAssetCid1 and ubAssetCid2
+    -- Creates ONE new contract with amount = 700.0 + 300.0 = 1000.0
     mergedUbAssetCid <- submit ub do
       exerciseCmd ubAssetCid1 Asset_Merge with
         otherAssetCid = ubAssetCid2
 
+    -- DAML CONCEPT: UTXO Split — SplitResult record
+    -- Returns a SplitResult record with two fields:
+    --   .splitAsset  → ContractId for the 400.0 portion
+    --   .remainder   → ContractId for the 600.0 remainder
     splittedUbAssetRecord <- submit ub do
       exerciseCmd mergedUbAssetCid Asset_Split with
         splitAmount = 400.0
 
+    -- Bank offers 400.0 to Alice using the split portion
+    -- DAML CONCEPT: Record field access with dot notation
+    -- `splittedUbAssetRecord.splitAsset` — access the splitAsset field
     ubToAliceCid <- submit ub do
       exerciseCmd splittedUbAssetRecord.splitAsset Asset_Transfer with
         recipient = alice
@@ -37,6 +65,7 @@ testUTXO = script do
     aliceAssetCid <- submit alice do
       exerciseCmd ubToAliceCid AssetTransferProposal_Accept
 
+    -- Bank offers the 600.0 remainder to Bob
     ubToBobCid <- submit ub do
       exerciseCmd splittedUbAssetRecord.remainder Asset_Transfer with
         recipient = bob
@@ -44,10 +73,13 @@ testUTXO = script do
     bobAssetCid <- submit bob do
       exerciseCmd ubToBobCid AssetTransferProposal_Accept
 
+    -- Alice transfers her 400.0 to Bob
+    -- After this: Bob has TWO contracts (600.0 and 400.0)
+    -- They could be merged with Asset_Merge, but this test stops here.
     aliceToBobCid <- submit alice do
       exerciseCmd aliceAssetCid Asset_Transfer with
         recipient = bob
-    
+
     bobTotalAssetCid <- submit bob do
       exerciseCmd aliceToBobCid AssetTransferProposal_Accept
 

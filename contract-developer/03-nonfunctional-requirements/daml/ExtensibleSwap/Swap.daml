@@ -1,26 +1,62 @@
-module ExtensibleSwap.Swap where 
+-- ============================================================
+-- MODULE: ExtensibleSwap.Swap
+-- PURPOSE: Asset-agnostic swap using interface ContractIds.
+--          Shows the key benefit of interfaces: write swap logic ONCE,
+--          works with Cash, Bond, or any future IAsset implementor.
+-- LEARNING FOCUS: ContractId IAsset (polymorphic contract IDs)
+-- ============================================================
+-- KEY INSIGHT:
+--   'ContractId IAsset' is a polymorphic contract ID.
+--   It can hold a reference to a Cash contract, a Bond contract,
+--   or any contract that implements IAsset.
+--   The Settle choice exercises Transfer on both — without knowing
+--   or caring whether they're Cash, Bond, or something else.
+-- ============================================================
+module ExtensibleSwap.Swap where
 
-import ExtensibleSwap.Interfaces 
+import ExtensibleSwap.Interfaces
 
-template AssetSwapProposal 
-  with 
-    requester: Party 
+-- ===== TEMPLATE: AssetSwapProposal =====
+-- A proposal to swap two assets of potentially different types.
+-- The requester offers one asset in exchange for another.
+template AssetSwapProposal
+  with
+    requester: Party
     receiver: Party
-    -- Triples of issuer, assetType, quantity
-    offerSpec: (Party, Text, Decimal)
-    offerCid: ContractId IAsset 
-    requestedSpec: (Party, Text, Decimal) 
+    -- Triples of (issuer, assetType, quantity) for human-readable specification
+    offerSpec: (Party, Text, Decimal)      -- what requester is offering
+    -- DAML CONCEPT: ContractId IAsset (interface contract ID)
+    -- This holds a reference to ANY contract implementing IAsset.
+    -- Could be Cash, Bond, or any future type — the swap logic doesn't care.
+    offerCid: ContractId IAsset
+    requestedSpec: (Party, Text, Decimal)  -- what requester wants in return
 
-  where 
-    signatory requester 
-    observer receiver 
+  where
+    signatory requester
+    observer receiver
 
-    choice Settle: () 
-      with 
-        requestedCid: ContractId IAsset 
-      controller receiver 
-      do 
-        exercise offerCid Transfer with newOwner = receiver 
+    -- ===== CHOICE: Settle =====
+    -- DAML CONCEPT: Exercising interface choices
+    -- 'exercise offerCid Transfer with newOwner = receiver' works on ANY IAsset.
+    -- The concrete type (Cash or Bond) is resolved at runtime.
+    -- This is POLYMORPHIC dispatch — same code, different behavior based on actual type.
+    choice Settle: ()
+      with
+        -- DAML CONCEPT: ContractId IAsset as choice argument
+        -- Receiver passes their asset's ContractId (as an IAsset).
+        -- The requester doesn't know or care if it's Cash or Bond.
+        requestedCid: ContractId IAsset
+      controller receiver
+      do
+        -- Exercise Transfer on the offered asset (goes to receiver)
+        -- Transfer requires both owner and newOwner — the authorization:
+        --   requester: signatory of AssetSwapProposal → provides offer authorization
+        --   receiver: controller of Settle → provides receive authorization
+        exercise offerCid Transfer with newOwner = receiver
+
+        -- Exercise Transfer on the requested asset (goes to requester)
         exercise requestedCid Transfer with newOwner = requester
 
         return ()
+        -- NOTE: If either transfer fails, BOTH are rolled back (atomicity).
+        -- This is the key property of Daml transactions — all-or-nothing.

@@ -1,46 +1,86 @@
+-- ============================================================
+-- MODULE: InitialState.Cash
+-- PURPOSE: The INITIAL STATE of the system before any upgrades.
+--          Demonstrates a multi-sig Position template and a
+--          simple propose-accept transfer workflow.
+-- LEARNING FOCUS: Multi-sig choices, derived signatories in proposals
+-- ============================================================
+-- UPGRADE CONTEXT:
+--   This is the ORIGINAL version of the Position template.
+--   Later upgrade modules (Upgrade1, 2, 3) extend this system.
+--   Compare this with Upgrade3/Currency.daml to see what changed.
+-- ============================================================
 module InitialState.Cash where
 
+-- ===== TEMPLATE: Position =====
+-- A financial position (think: cash holding in an account).
+-- Note: No contract key — multiple positions can exist per owner.
+-- (This differs from AccountBalance.daml's one-per-pair design)
 template Position
   with
     issuer : Party
     owner : Party
     quantity : Decimal
+    -- DAML CONCEPT: Observer list field
+    -- obs allows additional parties to see this position.
+    -- These are explicitly tracked in the contract (not auto-derived).
     obs : [Party]
   where
+    -- DAML CONCEPT: Signatory list syntax
+    -- [issuer, owner] provides both as a list literal.
+    -- Both must sign to create this position.
     signatory [issuer, owner]
     observer obs
     ensure quantity > 0.0
 
+    -- ===== CHOICE: ProposeTransfer =====
+    -- Creates a proposal for the owner to transfer to newOwner.
+    -- Only owner can initiate — they're giving up the position.
     choice ProposeTransfer : ContractId TransferProposal
       with
         newOwner : Party
       controller owner
       do
-        create TransferProposal with 
+        create TransferProposal with
           position = this
           newOwner
 
-
+    -- ===== CHOICE: Transfer =====
+    -- DAML CONCEPT: Multi-controller consuming choice
+    -- controller [owner, newOwner] — BOTH must authorize simultaneously.
+    -- This is the "mutual consent" transfer pattern.
+    -- WHY: Prevents owner from transferring to an unwilling party.
+    -- HOW it works: Both owner and newOwner must submit this choice together.
+    -- In script: use submitMulti [owner, newOwner] []
     choice Transfer : ContractId Position
       with
         newOwner : Party
       controller [owner, newOwner]
       do
-        create this with 
+        create this with
           owner = newOwner
-          obs = []
+          obs = []   -- clear observers on transfer (new owner gets clean slate)
 
 
-
-
+-- ===== TEMPLATE: TransferProposal =====
+-- The proposal for a propose-accept transfer.
 template TransferProposal
   with
     position : Position
     newOwner : Party
   where
+    -- DAML CONCEPT: Derived signatories from embedded record
+    -- signatory (signatory position) = take signatories of the Position record
+    -- = [issuer, owner]
     signatory (signatory position)
+
+    -- DAML CONCEPT: Cons in observer list
+    -- newOwner::(observer position) = prepend newOwner to position's observer list
+    -- This ensures newOwner can see the proposal.
     observer newOwner::(observer position)
 
+    -- ===== CHOICE: Accept =====
+    -- newOwner accepts — creates new Position with them as owner.
     choice Accept : ContractId Position
       controller newOwner
       do
@@ -48,12 +88,9 @@ template TransferProposal
           owner = newOwner
           obs = []
 
+    -- ===== CHOICE: Cancel =====
+    -- Original owner cancels — position returns unchanged.
     choice Cancel : ContractId Position
       controller position.owner
       do
         create position
-
-
-
-
-

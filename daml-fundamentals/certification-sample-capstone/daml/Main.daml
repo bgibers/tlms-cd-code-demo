@@ -1,27 +1,72 @@
+-- ============================================================
+-- MODULE: Main
+-- PROJECT: DamlForge - Project Management Application
+-- PURPOSE: Core contract templates for a project proposal and
+--          approval workflow between a proposer and evaluator.
+-- ============================================================
+-- KEY DAML CONCEPTS DEMONSTRATED:
+--   - Templates (contract definitions)
+--   - Signatory / Observer roles
+--   - Contract Keys for uniqueness
+--   - ensure (preconditions)
+--   - Consuming vs nonconsuming choices
+--   - Custom typeclasses (Duration)
+--   - Either and Optional types
+--   - Multi-step workflow: Propose → Reject/Revise → Approve → Evaluate
+-- ============================================================
 module Main where
 
+-- DAML CONCEPT: Import - bring in the time library for Date/Time operations
 import DA.Time
 
+-- DAML CONCEPT: Type Aliases
+-- These are just shorthand names for ContractId types, making the code more readable.
+-- ContractId is a reference (pointer) to a contract living on the ledger.
 type ProjectProposalId = ContractId ProjectProposal
 type ProjectId = ContractId Project
 
+-- ===== DATA TYPE: ProjectInfo =====
+-- DAML CONCEPT: Record type (Product type)
+-- A record bundles multiple named fields into one value.
+-- This is NOT a contract — it's pure data stored inside contracts.
 data ProjectInfo = ProjectInfo with
-    lead: Party
+    lead: Party              -- DAML CONCEPT: Party = a participant on the ledger (identified by their key)
     title: Text
     details: Text
     soloProject: Bool
-    participants: Either Party [Party] -- either 1 person or a group of people
-    budgetRequirement: Optional (Decimal) -- either the amount in USD or None
+    -- DAML CONCEPT: Either type
+    -- Either a b means "this is EITHER an 'a' OR a 'b', but not both".
+    -- Left = solo participant (single Party), Right = group ([Party])
+    -- WHY: Models the business rule "a project has either one lead or a team"
+    participants: Either Party [Party]
+    -- DAML CONCEPT: Optional type
+    -- Optional a means "this might be present (Some a) or absent (None)".
+    -- WHY: Budget is not always required; using Optional avoids sentinel values like -1 or ""
+    budgetRequirement: Optional (Decimal)
     startDate: Date
     endDate: Date
+        -- DAML CONCEPT: deriving clause
+        -- Automatically generates instances of Show (for printing), Eq (for ==), Ord (for ordering).
+        -- Required for ProjectInfo to be used as a contract key (keys must be Ord).
         deriving (Show, Eq, Ord)
 
+-- ===== TYPECLASS: Duration =====
+-- DAML CONCEPT: Custom typeclass
+-- A typeclass defines a shared interface that multiple types can implement.
+-- Here: "things of type 'i' can produce an output 'o' representing their duration"
+-- NOTE: This is similar to Java interfaces or Rust traits — it's ad-hoc polymorphism.
 class Duration i o where
     getDuration : i -> o
 
+-- DAML CONCEPT: Typeclass instance
+-- This tells Daml: "ProjectInfo can produce an Int representing its working-day duration"
 instance Duration ProjectInfo Int where
     getDuration proj =
         let
+            -- DAML CONCEPT: Time arithmetic
+            -- time: constructs a Time from Date + hour/min/sec
+            -- subTime: returns RelTime (relative time difference)
+            -- wholeDays: converts RelTime to whole number of days
             startT: Time
             startT = time proj.startDate 09 00 00
 
@@ -34,87 +79,149 @@ instance Duration ProjectInfo Int where
             diffInDays: Int
             diffInDays = wholeDays diffInRelTime
 
-            diffInWeekDays = diffInDays - (diffInDays/7 * 2) + 1 -- account for weekdays
-        in 
+            -- Subtract 2 days per week (weekends) then add 1 for inclusive count
+            diffInWeekDays = diffInDays - (diffInDays/7 * 2) + 1
+        in
             diffInWeekDays
 
 
+-- ===== TEMPLATE: ProjectProposal =====
+-- DAML CONCEPT: Template
+-- A template is the TYPE of a contract. Contracts are instances of templates.
+-- Template fields are the contract's state — immutable once created.
 template ProjectProposal
     with
-        proposer: Party
+        proposer: Party       -- the person submitting the project idea
         projectInfo: ProjectInfo
-        evaluator: Party
-        note: Text
+        evaluator: Party      -- the person reviewing/approving the proposal
+        note: Text            -- feedback or comments (initially empty, filled on Reject)
     where
+        -- DAML CONCEPT: signatory
+        -- The signatory MUST authorize contract creation (their signature is cryptographically required).
+        -- They are also responsible for the contract's existence — they "own" the obligation.
+        -- Only the proposer signs the proposal; they create it unilaterally.
         signatory proposer
+
+        -- DAML CONCEPT: observer
+        -- Observers can SEE the contract on the ledger but do NOT need to authorize creation.
+        -- The evaluator needs to see this proposal to evaluate it, but didn't agree to its creation.
         observer evaluator
-        
+
+        -- DAML CONCEPT: Contract Key
+        -- A key uniquely identifies a contract of this type. Like a primary key in a DB.
+        -- (proposer, projectInfo) means a proposer cannot have two identical proposals active at once.
         key (proposer, projectInfo) : (Party, ProjectInfo)
+        -- DAML CONCEPT: maintainer
+        -- The maintainer is responsible for the key's uniqueness. Must be a subset of signatories.
+        -- key._1 = the first element of the key tuple = proposer
         maintainer key._1
 
-        ensure (projectInfo.startDate < projectInfo.endDate) -- endDate has to be later than startDate
+        -- DAML CONCEPT: ensure
+        -- A precondition that MUST be true for the contract to be created.
+        -- If this fails, contract creation is rejected with a PreconditionFailed exception.
+        -- WHY: Enforce business rule: project must have a valid time range
+        ensure (projectInfo.startDate < projectInfo.endDate)
 
-        -- simply returns the ContractId of the current contract without archiving anything; can be used as a reminder if the proposal doesn't get either Approved or Rejected for a while
+        -- ===== CHOICE: Propose =====
+        -- DAML CONCEPT: nonconsuming choice
+        -- "nonconsuming" means exercising this choice does NOT archive (delete) the contract.
+        -- The contract stays active after the choice runs.
+        -- WHY: This is just a reminder ping — it returns self so the caller knows the proposal is pending.
+        -- RETURNS: ProjectProposalId (= ContractId ProjectProposal)
         nonconsuming choice Propose: ProjectProposalId
             controller proposer
             do
-                return self
+                return self  -- 'self' refers to this contract's ContractId
 
-        -- evaluator can check the list of accomplishments of the proposer to see if this proposer is qualified/ready take on a new project
+        -- ===== CHOICE: ProposerAccomplishments =====
+        -- DAML CONCEPT: nonconsuming choice with arguments
+        -- Arguments are passed IN to the choice body. They're not stored in the contract.
+        -- The evaluator checks what the proposer has achieved before deciding.
+        -- RETURNS: list of accomplishment descriptions
         nonconsuming choice ProposerAccomplishments: ([Text])
             with
+                -- A list of (ContractId, value) pairs — the "active contract set" for Accomplishment
                 accomplishments: [(ContractId Accomplishment, Accomplishment)]
             controller evaluator
             do
+                -- DAML CONCEPT: null — tests if a list is empty
                 if null accomplishments then return ["N/A"]
                 else do
-                    -- 1. map ver.
+                    -- DAML CONCEPT: map — applies a function to every element of a list
+                    -- Here: extract title + details from each accomplishment record
+                    -- The lambda \acc -> ... creates an anonymous function
                     return $ map (\acc -> acc._2.project.projectInfo.title <> " : " <> acc._2.project.projectInfo.details) accomplishments
-                    
-                    -- 2. forA ver. (Avoid using "trace" in production code as it is not recommended.)
+
+                    -- ALTERNATIVE: forA (applicative for-loop) with trace (debug logging)
+                    -- NOTE: trace prints to the IDE log — avoid in production code
                     -- forA accomplishments (\acc -> do
-                    --     let 
+                    --     let
                     --         accDetails = acc._2.project.projectInfo.title <> " : " <> acc._2.project.projectInfo.details
                     --     trace(accDetails)(return accDetails))
 
 
-        -- evaluator can Reject the proposer with feedback
+        -- ===== CHOICE: Reject =====
+        -- DAML CONCEPT: consuming choice (default when no keyword is specified)
+        -- Exercising this ARCHIVES (deletes) the current contract.
+        -- Then we create a new one with the feedback baked in.
+        -- WHY: Archives the old proposal and creates a new one with evaluator's feedback in the note field.
         choice Reject: ProjectProposalId
             with
-                feedback: Text
+                feedback: Text  -- evaluator's reason for rejection
             controller evaluator
             do
+                -- DAML CONCEPT: create this with
+                -- 'this' refers to the current contract's data.
+                -- 'create this with note = feedback' creates a new contract identical except note is updated.
                 create this with
                     note = feedback
 
-        -- an example of preconsuming choice; can be a regular choice without the archive function
-        -- upon getting rejected, the original proposer can Revise the ProjectInfo to re-propose
+        -- ===== CHOICE: Revise =====
+        -- DAML CONCEPT: nonconsuming choice that manually archives and recreates
+        -- After rejection, proposer updates the project info.
+        -- We explicitly archive self before creating a new version (manual consume pattern).
+        -- WHY: nonconsuming gives us control over WHEN the archive happens (after assertMsg check)
         nonconsuming choice Revise: ProjectProposalId
             with
                 newProjectInfo: ProjectInfo
                 comment: Text
             controller proposer
             do
+                -- DAML CONCEPT: assertMsg
+                -- Aborts transaction with message if condition is False.
+                -- /= means "not equal"
                 assertMsg ("Project info needs to be revised")(this.projectInfo /= newProjectInfo)
+                -- DAML CONCEPT: archive self
+                -- Manually deletes this contract from the ledger.
                 archive self
                 create this with
                     projectInfo = newProjectInfo
                     note = comment
 
-        -- proposer can cancle the proposal
+        -- ===== CHOICE: Cancel =====
+        -- WHY: Proposer can withdraw their own proposal.
+        -- Returns () = unit = "nothing" (like void in other languages)
         choice Cancel: ()
             controller proposer
             do
                 return ()
 
-        -- evaluator can approve the ProjectProposal & create a Project contract
+        -- ===== CHOICE: Approve =====
+        -- DAML CONCEPT: choice that creates a different template
+        -- This is the key workflow transition: Proposal → Project.
+        -- Only the evaluator can approve, and only after checking the evaluation date.
         choice Approve: ProjectId
             with
-                evaluationDate: Date -- when will the project get evaluated
-                evaluatorNote: Optional(Text)  
+                evaluationDate: Date
+                evaluatorNote: Optional(Text)
             controller evaluator
             do
+                -- DAML CONCEPT: assertMsg with field access
+                -- projectInfo.endDate accesses the endDate field of the nested record
                 assertMsg "Project should be evaluated after the deadline." (evaluationDate > projectInfo.endDate)
+                -- DAML CONCEPT: create <TemplateName> with
+                -- Creates a contract of a DIFFERENT type (Project, not ProjectProposal)
+                -- getDuration uses our custom Duration typeclass to calculate working days
                 create Project with
                     projectInfo
                     duration = getDuration projectInfo
@@ -123,21 +230,33 @@ template ProjectProposal
                     evaluatorNote
 
 
+-- ===== TEMPLATE: Project =====
+-- A Project is created when a proposal is Approved.
+-- Both evaluator and project lead are signatories — mutual agreement is required.
 template Project
     with
         projectInfo: ProjectInfo
-        duration: Int
+        duration: Int             -- working days, computed from ProjectInfo
         evaluator: Party
         evaluationDate: Date
         evaluatorNote: Optional(Text)
     where
-        signatory evaluator, projectInfo.lead 
+        -- DAML CONCEPT: Multiple signatories
+        -- BOTH evaluator AND projectInfo.lead must authorize creation.
+        -- In practice, approval creates this contract — the evaluator authorizes it via the Approve choice.
+        -- The proposer (now "lead") authorized the original proposal, which is transitive here.
+        signatory evaluator, projectInfo.lead
 
         key (projectInfo.lead, projectInfo):(Party, ProjectInfo)
         maintainer key._1
 
+        -- ensure re-enforces the same constraint at the Project level
         ensure evaluationDate > projectInfo.endDate
 
+        -- ===== CHOICE: Evaluate =====
+        -- DAML CONCEPT: Choice returning Either
+        -- Returns Left (new Project, not ready) or Right (Accomplishment, ready to publish)
+        -- WHY Either: caller can pattern-match on the result to handle both outcomes
         choice Evaluate: Either (ContractId Project) (ContractId Accomplishment)
             with
                 todaysDate: Date
@@ -145,31 +264,34 @@ template Project
                 readyToPublish: Bool
             controller evaluator
             do
-                -- 1. if ver:
+                -- DAML CONCEPT: if-then-else as expression
+                -- Both branches must return the same type: Either (ContractId Project) (ContractId Accomplishment)
+                -- Right = success path (Accomplishment created)
+                -- Left = not-yet path (Project re-created with new evaluation date)
                 if readyToPublish then do
                     newAcc <- create Accomplishment with
                         project = this
                         evaluator
                     return (Right newAcc)
                 else do
-                    currProj <- create this with 
+                    currProj <- create this with
                         evaluationDate = todaysDate
                         evaluatorNote = feedback
                     return (Left currProj)
 
-                -- 2. case ver:             
+                -- ALTERNATIVE: case expression — equivalent to if-then-else above
                 -- case readyToPublish of
                 --     False -> do
-                --         currProj <- create this with
-                --             evaluationDate = todaysDate
-                --             evaluatorNote = feedback
+                --         currProj <- create this with ...
                 --         return (Left currProj)
                 --     True -> do
-                --         newAcc <- create Accomplishment with
-                --             project = this
-                --             evaluator
+                --         newAcc <- create Accomplishment with ...
                 --         return (Right newAcc)
 
+        -- ===== CHOICE: ChangeDates =====
+        -- DAML CONCEPT: Multi-controller choice
+        -- Both evaluator AND projectInfo.lead must authorize this change.
+        -- WHY: Date changes affect both parties, so both must agree (mutual consent)
         choice ChangeDates: ProjectId
             with
                 newStartDate: Date
@@ -178,6 +300,9 @@ template Project
                 comment: Optional(Text)
             controller evaluator, projectInfo.lead
             do
+                -- DAML CONCEPT: let binding
+                -- Create a local immutable variable in the choice body.
+                -- We reconstruct ProjectInfo because records are immutable — must create new one.
                 let
                     newProjectInfo = ProjectInfo with
                         lead = projectInfo.lead
@@ -195,19 +320,28 @@ template Project
                     evaluationDate = newEvalDate
                     evaluatorNote = comment
 
+        -- NOTE: Typo in original — "CancleProject" should be "CancelProject"
+        -- WHY: Both parties can cancel — it's a mutual decision
         choice CancleProject: ()
             controller evaluator, projectInfo.lead
             do
                 return ()
 
 
+-- ===== TEMPLATE: Accomplishment =====
+-- Final outcome contract: a completed and published project.
+-- Created only via the Evaluate choice — cannot be directly created by either party alone.
 template Accomplishment
     with
-        project: Project
+        project: Project   -- the full Project record is embedded here
         evaluator: Party
     where
-        -- 1. Ensure that the signatories of a Project contract is equal to that of Accomplishment contract
-        -- 2. Prevent Accomplishment contract from being created outside the Evaluate choice
+        -- DAML CONCEPT: Derived signatories
+        -- signatory (signatory project) means: "take the signatories of the 'project' value".
+        -- project is a PROJECT RECORD (not a contract), so this extracts [evaluator, projectInfo.lead].
+        -- WHY: Accomplishment automatically inherits the same authorization as the project.
+        -- This also prevents direct creation: you can't create Accomplishment without being
+        -- both evaluator and lead, AND the project record must have valid signatories.
         signatory (signatory project)
 
         key (project.projectInfo.lead, project.projectInfo) : (Party, ProjectInfo)

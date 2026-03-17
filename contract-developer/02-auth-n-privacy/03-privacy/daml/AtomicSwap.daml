@@ -1,33 +1,86 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: AtomicSwap
+-- PURPOSE: Implements the Atomic Swap design pattern using the UTXO
+--          (Unspent Transaction Output) model. Two parties can exchange
+--          assets atomically — both transfers happen or neither does.
+-- LEARNING FOCUS: Atomic swap, UTXO model, observer list for privacy,
+--                 SplitResult, proposal-accept for transfers
+-- ============================================================
+-- PATTERN: Atomic Swap
+-- Problem: Alice has Euros, Bob has Dollars. They want to exchange.
+--   - If transfers were separate transactions, one could fail after the other.
+--   - Risk: Alice sends Euros, Bob never sends Dollars (or vice versa).
+-- Solution: Put BOTH transfers in ONE transaction.
+--   - Daml guarantees: if any operation in a transaction fails, ALL roll back.
+--   - Either both parties get their assets, or neither does. No partial state.
+--
+-- How it works in SwapProposal_Accept:
+--   1. Fetch Bob's asset (validates it matches the requested spec)
+--   2. Transfer Alice's offered asset → Bob's ownership (creates AssetTransferProposal)
+--   3. Transfer Bob's requested asset → Alice's ownership (creates AssetTransferProposal)
+--   4. Both proposals accepted in the SAME transaction
+--   → If step 4 fails for either asset, the entire transaction rolls back.
+-- ============================================================
+-- PATTERN: UTXO Model
+-- Each asset is a SEPARATE contract on the ledger.
+-- Split: archive one contract, create two contracts.
+-- Merge: archive two contracts, create one contract.
+-- Transfer: archive and recreate with new owner.
+-- WHY: Enables arbitrary denomination changes without modifying a single "account".
+-- ============================================================
 module AtomicSwap where
 
+-- ===== DATA TYPE: SplitResult =====
+-- DAML CONCEPT: Named return type
+-- Asset_Split creates TWO new contracts. Since a choice can only return one value,
+-- we bundle both ContractIds in a record.
+-- The caller accesses: result.splitAsset and result.remainder
 data SplitResult = SplitResult with
-  splitAsset : ContractId Asset
-  remainder : ContractId Asset
+  splitAsset : ContractId Asset   -- The requested portion (splitAmount)
+  remainder : ContractId Asset    -- What's left over (amount - splitAmount)
     deriving (Eq, Show)
 
+-- ===== TEMPLATE: Asset =====
+-- DAML CONCEPT: UTXO asset with observers
+-- Signatories: both issuer AND owner must authorize.
+-- Observers: explicit list for privacy control.
+-- WHY observers list?
+--   By default, only signatories can see a contract.
+--   Adding observers allows specific parties to see the asset —
+--   needed for atomic swaps (Bob must be able to see Alice's Euro asset
+--   when she proposes the swap).
 template Asset
   with
-    issuer: Party
-    owner : Party
-    amount : Decimal
-    observers: [Party]
+    issuer: Party      -- Who created/backs this asset
+    owner : Party      -- Who currently holds it
+    amount : Decimal   -- Denomination
+    observers: [Party] -- Parties explicitly given visibility
   where
-    signatory issuer, owner
-    observer observers
-    ensure amount > 0.0 
+    signatory issuer, owner   -- Both must sign — prevents unauthorized minting
+    observer observers         -- Explicit visibility list
+    ensure amount > 0.0        -- Can't have zero or negative assets
 
-    choice Asset_Transfer: ContractId AssetTransferProposal 
+    -- DAML CONCEPT: Asset_Transfer creates a proposal (not direct transfer)
+    -- WHY: Direct transfer without recipient consent would be "spam".
+    -- Card_Transfer (in Market.daml) requires mutual consent for same reason.
+    -- Here we use a proposal pattern: owner proposes, recipient accepts.
+    choice Asset_Transfer: ContractId AssetTransferProposal
       with
         recipient: Party
       controller owner
       do
         create AssetTransferProposal with
-          asset = this with observers = []
+          asset = this with observers = []  -- Clear observers on transfer (fresh start for new owner)
           recipient
 
+    -- DAML CONCEPT: Asset_Merge — combine two contracts into one
+    -- Validates: same issuer and owner (can't merge assets from different issuers or owners)
+    -- Archives: the `otherAssetCid` (second asset disappears)
+    -- Creates: new contract with combined amount
+    -- WHY this is the UTXO merge operation: two UTXOs → one UTXO
     choice Asset_Merge: ContractId Asset
       with
         otherAssetCid: ContractId Asset
@@ -42,6 +95,11 @@ template Asset
         create this with
           amount = amount + otherAsset.amount
 
+    -- DAML CONCEPT: Asset_Split — divide one contract into two
+    -- Creates: splitAsset (the requested portion) + remainder (what's left)
+    -- Returns: SplitResult with both new ContractIds
+    -- WHY the ensure clause matters here: if splitAmount >= amount,
+    -- remainder would be <= 0, violating `ensure amount > 0.0` on the new contract.
     choice Asset_Split: SplitResult
       with
         splitAmount: Decimal
@@ -55,6 +113,10 @@ template Asset
           splitAsset
           remainder
 
+    -- DAML CONCEPT: Asset_SetObservers — privacy control
+    -- Owner can add observers to make the asset visible for swap negotiations.
+    -- WHY: Before proposing a swap, Alice adds Bob as observer so Bob can
+    -- verify what he's receiving (and the ledger allows him to fetch it).
     choice Asset_SetObservers: ContractId Asset
       with
         newObservers: [Party]
@@ -63,50 +125,76 @@ template Asset
         create this with
           observers = newObservers
 
+-- ===== TEMPLATE: AssetTransferProposal =====
+-- DAML CONCEPT: Propose-Accept for asset transfers
+-- Issuer and owner (via derived signatory) must have authorized the transfer.
+-- Recipient is an observer — they can see the proposal and choose to accept or reject.
 template AssetTransferProposal
   with
-    asset: Asset
-    recipient : Party
+    asset: Asset      -- The asset being transferred (full record, not ContractId)
+    recipient : Party -- Who the asset is being offered to
   where
-    signatory (signatory asset) 
+    -- DAML CONCEPT: derived signatory
+    -- `signatory (signatory asset)` = issuer and owner of the asset.
+    -- This means both must have authorized creating this proposal.
+    -- The Transfer choice on Asset requires `controller owner`, so owner authorized it.
+    signatory (signatory asset)
     observer recipient
-    ensure asset.amount > 0.0
+    ensure asset.amount > 0.0  -- Validates that the asset being proposed is valid
 
+    -- DAML CONCEPT: Accept transfers ownership
+    -- Creates a new Asset with owner = recipient.
+    -- `controller recipient` — only the recipient can accept.
     choice AssetTransferProposal_Accept: ContractId Asset
       controller recipient
       do
         create asset with
           owner = recipient
 
+    -- DAML CONCEPT: Reject — returns the asset to its original owner
+    -- Creates a new Asset with the SAME owner (no change to ownership).
+    -- This effectively cancels the proposal.
     choice AssetTransferProposal_Reject: ContractId Asset
       controller recipient
       do
         create asset
 
+-- ===== TEMPLATE: SwapProposal =====
+-- DAML CONCEPT: Atomic Swap proposal
+-- Initiator offers one asset and requests a specific asset in return.
+-- `requestedAsset: Asset` — carries the FULL specification of what's wanted.
+-- recipient validates: "is this exactly what I agreed to give?"
 template SwapProposal
     with
       initiator: Party
       recipient: Party
-      offerCid: ContractId Asset
-      requestedAsset: Asset
+      offerCid: ContractId Asset           -- What initiator is offering
+      requestedAsset: Asset                -- What initiator wants in return (full spec)
     where
       signatory initiator
       observer recipient
 
+      -- DAML CONCEPT: SwapProposal_Accept — atomic settlement
+      -- Both asset transfers happen in ONE transaction.
+      -- If either transfer fails, the whole thing rolls back.
+      -- This is the core of the Atomic Swap guarantee.
       choice SwapProposal_Accept: ()
         with
-          assetCid: ContractId Asset
+          assetCid: ContractId Asset  -- The ContractId of recipient's actual asset
         controller recipient
         do
-          asset <- fetch assetCid
-          assertMsg "Asset issuer does NOT match." (asset.issuer == requestedAsset.issuer) 
+          asset <- fetch assetCid  -- Fetch recipient's asset to verify it matches the spec
+          -- Validation: ensure the provided asset matches what was requested
+          -- Without these checks, recipient could provide any asset (wrong issuer, amount, etc.)
+          assertMsg "Asset issuer does NOT match." (asset.issuer == requestedAsset.issuer)
           assertMsg "Asset amount does NOT match." (asset.amount == requestedAsset.amount)
           assertMsg "Asset owner does NOT match." (asset.owner == requestedAsset.owner)
 
-          offerTransferProposal <- exercise offerCid Asset_Transfer with recipient 
+          -- ATOMIC TRANSFER 1: Initiator's offered asset → recipient
+          offerTransferProposal <- exercise offerCid Asset_Transfer with recipient
+          -- ATOMIC TRANSFER 2: Recipient's asset → initiator
           requestedTransferProposal <- exercise assetCid Asset_Transfer with recipient = initiator
+          -- Both Accept calls in the SAME transaction — all-or-nothing atomicity
           exercise offerTransferProposal AssetTransferProposal_Accept
           exercise requestedTransferProposal AssetTransferProposal_Accept
           pure()
-
-

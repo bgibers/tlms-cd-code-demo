@@ -1,3 +1,28 @@
+-- ============================================================
+-- MODULE: Test
+-- PURPOSE: Happy and unhappy path tests for the DamlForge capstone.
+--          Demonstrates how to structure comprehensive test suites in Daml.
+-- LEARNING FOCUS: submit, submitMustFail, query @T, queryContractId,
+--                 script composition chains, test fixture reuse
+-- ============================================================
+-- PATTERN: Composed test chain
+--   Each test function calls the previous, building up ledger state.
+--   testCreateProjectProposal
+--       ↓ calls
+--   testProjectProposal
+--       ↓ calls
+--   testCreateProject
+--       ↓ calls
+--   testCreateAccomplishment
+-- This avoids code duplication while ensuring each test starts from
+-- a known, consistent ledger state.
+-- ============================================================
+-- DAML CONCEPT: Happy vs Unhappy Paths
+-- Happy paths: test that valid actions SUCCEED.
+-- Unhappy paths: test that invalid actions FAIL (using submitMustFail).
+-- Both are equally important — Daml's value is its security guarantees,
+-- so you must verify that unauthorized actions are actually rejected.
+-- ============================================================
 module Test where
 
 import Main
@@ -8,7 +33,7 @@ import Daml.Script
 {-
     Min 1 Full Scenario & Min 3 Happy Paths
         + testCreateProjectProposal: proposer can create ProjectProposal contracts & evaluator can exercise can check "ProposerAccomplishments" to either "Reject" or "Approve"
-            1. proposer creates a ProjectProposal contract     
+            1. proposer creates a ProjectProposal contract
         + testProjectProposal: proposer and evaluator can exercise ProposerAccomplishments, Reject, Revise
             2. evaluator exercises ProposerAccomplishments to check proposer's past accomplishments and confrim if proposer is ready to take on a new responsibility
             3. evaluator exercises Reject with a feedback: "Aim to finish it by the end of March"
@@ -20,14 +45,22 @@ import Daml.Script
 
     Min 3 Unhappy Paths
         - cantCreateWrongDates: proposer cannot create a ProjectProposal contract if startDate > endDate
-        - cantApproveMyself: proposer cannot "Approve" their own proposal contract 
+        - cantApproveMyself: proposer cannot "Approve" their own proposal contract
         - cantCreateAccomplishment: proposer cannot create an Accomplishment contract out of a Project contract without evaluator's approval/authority
 -}
 
+-- ===== HAPPY PATH 1: CREATE PROJECT PROPOSAL =====
+-- DAML CONCEPT: Script composition chain
+-- This test calls setupAccomplishments first to get the baseline state
+-- (two accomplishments already on the ledger), then adds proposal3.
+-- Each test function receives its inputs and RETURNS a tuple with the
+-- updated state — the next test function receives that tuple.
+-- WHY: Avoids recreating the entire world for each test; builds incrementally.
 -- + testCreateProjectProposal: proposer can create ProjectProposal contracts & evaluator can exercise "ProposerAccomplishments" to either "Reject" or "Approve"
 testCreateProjectProposal = script do
     (testParties@TestParties{..}, testProjectInfos@TestProjectInfos{..}, proj1Accomplished, proj2Accomplished) <- setupAccomplishments
     -- 1. proposer creates a ProjectProposal contract
+    -- DAML CONCEPT: submit returns the ContractId of the created contract
     proposal3 <- submit proposer do
         createCmd ProjectProposal with
             proposer
@@ -36,21 +69,34 @@ testCreateProjectProposal = script do
             note = "Third proposal"
     return (testParties, testProjectInfos, proj1Accomplished, proj2Accomplished, proposal3)
 
+-- ===== HAPPY PATH 2: REJECT AND REVISE =====
+-- DAML CONCEPT: query @T party
+-- Returns all ACTIVE contracts of type T visible to `party`.
+-- Here, evaluator checks how many accomplishments proposer already has
+-- before deciding to approve or reject the new proposal.
+-- NOTE: This is a key authorization pattern — evaluators can query
+-- the proposer's track record before making decisions.
 -- + testProjectProposal: proposer and evaluator can exercise ProposerAccomplishments, Reject, Revise
 testProjectProposal = script do
     (testParties@TestParties{..}, testProjectInfos@TestProjectInfos{..}, proj1Accomplished, proj2Accomplished, proposal3) <- testCreateProjectProposal
     proposerAccs <- query @Accomplishment proposer
     -- 2. evaluator exercises ProposerAccomplishments to check proposer's past accomplishments and confrim if proposer is ready to take on a new responsibility
+    -- DAML CONCEPT: nonconsuming choice — proposal3 is NOT archived; evaluator is just reading accomplishment data
     checkProposerAcc <- submit evaluator do
         exerciseCmd proposal3 ProposerAccomplishments with
             accomplishments = proposerAccs
     -- debug checkProposerAcc
-    
+
     -- 3. evaluator exercise Reject with a feedback: "Aim to finish it by the end of March"
+    -- DAML CONCEPT: consuming choice — proposal3 IS archived; rejectedProposal is a NEW ContractId
+    -- The Reject choice returns a new ProjectProposal with the feedback embedded.
     rejectedProposal <- submit evaluator do
         exerciseCmd proposal3 Reject with
             feedback = "Aim to finish it by the end of March"
 
+    -- DAML CONCEPT: let bindings in scripts
+    -- Pure data construction; does NOT touch the ledger.
+    -- We build a revised ProjectInfo value to pass to the Revise choice.
     let
         revisedProjectInfo = ProjectInfo with
             lead = proposer
@@ -60,8 +106,10 @@ testProjectProposal = script do
             participants = Left proposer
             budgetRequirement = None
             startDate = date 2023 Feb 15
-            endDate = date 2023 Mar 25            
+            endDate = date 2023 Mar 25     -- Updated from Apr 10 to Mar 25
     -- 4. proposer exercises Revise with an updated endDate (March 25, 2023)
+    -- AUTH: Only the proposer can exercise Revise (they control it).
+    -- PATTERN: Rejection creates a new proposal with feedback; Revise updates the info and submits again.
     revisedProposal <- submit proposer do
         exerciseCmd rejectedProposal Revise with
             newProjectInfo = revisedProjectInfo
@@ -69,27 +117,39 @@ testProjectProposal = script do
 
     return (testParties, testProjectInfos, proj1Accomplished, proj2Accomplished, revisedProposal)
 
+-- ===== HAPPY PATH 3: APPROVE =====
 -- + testCreateProject: evaluator can "Approve" to create a Project contract
-testCreateProject = script do 
+testCreateProject = script do
     (testParties@TestParties{..}, testProjectInfos@TestProjectInfos{..}, proj1Accomplished, proj2Accomplished, revisedProposal) <- testProjectProposal
     -- 5. evaluator exercises Approve - a Project contract is created
+    -- DAML CONCEPT: Approve is a consuming choice that creates a Project (different template).
+    -- The Project has BOTH evaluator AND proposer as signatories (more commitments than proposal).
     approvedProj <- submit evaluator do
         exerciseCmd revisedProposal Approve with
             evaluationDate = date 2023 Mar 26
             evaluatorNote = Some "Approved. Looking forward to see your deliverable."
-    
+
     return (testParties, testProjectInfos, proj1Accomplished, proj2Accomplished, approvedProj)
 
+-- ===== HAPPY PATH 4: EVALUATE TO ACCOMPLISHMENT =====
 -- + testCreateAccomplishment: evaluator can "Evaluate" for proposer and evaluator to create an "Accomplishment" once a "Project" is completed
 testCreateAccomplishment = script do
     (testParties@TestParties{..}, testProjectInfos@TestProjectInfos{..}, proj1Accomplished, proj2Accomplished, approvedProj) <- testCreateProject
     -- 6. evaluator exercises Evaluate and decides that it's ready to be published - an Accomplishment contract is created
+    -- DAML CONCEPT: Evaluate returns Either (ContractId Project) (ContractId Accomplishment)
+    -- readyToPublish = True → returns Right (ContractId Accomplishment)
+    -- readyToPublish = False → returns Left (ContractId Project) (rescheduled)
     submit evaluator do
         exerciseCmd approvedProj Evaluate with
             todaysDate = date 2023 Mar 26
             feedback = Some "Excellent"
             readyToPublish = True
 
+-- ===== UNHAPPY PATH 1: WRONG DATES =====
+-- DAML CONCEPT: submitMustFail
+-- Asserts that the command FAILS (throws an exception or is rejected).
+-- Used to test that the `ensure` clause enforces date ordering.
+-- If the command unexpectedly SUCCEEDS, the test script itself fails.
 -- - cantCreateWrongDates: proposer cannot create a ProjectProposal contract if startDate > endDate
 cantCreateWrongDates = script do
     testParties@TestParties{..} <- setupTestParties
@@ -102,9 +162,12 @@ cantCreateWrongDates = script do
             soloProject = True
             participants = Left proposer
             budgetRequirement = None
-            startDate = date 2023 Apr 10
-            endDate = date 2023 Feb 15    
+            startDate = date 2023 Apr 10   -- WRONG: start is AFTER end
+            endDate = date 2023 Feb 15     -- WRONG: end is BEFORE start
 
+    -- DAML CONCEPT: ensure clause rejection
+    -- The ProjectProposal template has: ensure startDate < endDate
+    -- This automatically throws PreconditionFailed when the condition is false.
     submitMustFail proposer do
         createCmd ProjectProposal with
             proposer
@@ -112,21 +175,40 @@ cantCreateWrongDates = script do
             evaluator
             note = "Third proposal"
 
--- - cantApproveMyself: proposer cannot "Approve" their own proposal contract 
+-- ===== UNHAPPY PATH 2: SELF-APPROVAL =====
+-- DAML CONCEPT: Controller restriction
+-- The Approve choice has: controller evaluator
+-- This means ONLY evaluator can exercise it.
+-- If proposer (a different party) tries to exercise it, the ledger rejects it.
+-- - cantApproveMyself: proposer cannot "Approve" their own proposal contract
 cantApproveMyself = script do
     (testParties@TestParties{..}, testProjectInfos@TestProjectInfos{..}, proj1Accomplished, proj2Accomplished, revisedProposal) <- testProjectProposal
-    
+
+    -- AUTH: proposer tries to exercise a choice controlled by evaluator → REJECTED
     submitMustFail proposer do
         exerciseCmd revisedProposal Approve with
             evaluationDate = date 2023 Mar 26
             evaluatorNote = Some "Approved. Looking forward to see your deliverable."
 
+-- ===== UNHAPPY PATH 3: DIRECT ACCOMPLISHMENT CREATION =====
+-- DAML CONCEPT: Derived signatories (authorization inheritance)
+-- Accomplishment has: signatory (signatory project)
+-- This means both proposer AND evaluator must sign — but proposer alone can't.
+-- You'd need BOTH parties to call createCmd, which would require submitMulti.
+-- But even then, the intended creation path is ONLY via the Evaluate choice.
+-- This test verifies that proposer alone cannot create Accomplishment directly.
 -- - cantCreateAccomplishment: proposer cannot create an Accomplishment contract out of a Project contract without evaluator's approval/authority
 cantCreateAccomplishment = script do
     (testParties@TestParties{..}, testProjectInfos@TestProjectInfos{..}, proj1Accomplished, proj2Accomplished, approvedProj) <- testCreateProject
-    
+
+    -- DAML CONCEPT: queryContractId alice cid
+    -- Returns Some contract if `alice` can see the contract with that ID, else None.
+    -- We use it here to get the Project data so we can attempt to create Accomplishment.
     Some testProj <- queryContractId proposer approvedProj
 
+    -- AUTH: proposer tries to directly create Accomplishment → REJECTED
+    -- Accomplishment's signatory includes evaluator (inherited from project.evaluator).
+    -- proposer alone does not have evaluator's authority.
     submitMustFail proposer do
         createCmd Accomplishment with
             project = testProj

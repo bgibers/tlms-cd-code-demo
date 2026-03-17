@@ -1,6 +1,21 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: Preconsuming
+-- PURPOSE: Demonstrates the PRECONSUMING choice keyword.
+-- LEARNING FOCUS: When to use preconsuming vs consuming
+-- ============================================================
+-- CONSUMING CHOICE TIMING:
+--   (default / preconsuming): contract archived BEFORE body executes
+--   postconsuming:            contract archived AFTER body executes
+--
+-- PRECONSUMING vs DEFAULT CONSUMING:
+--   Functionally identical — both archive before the body runs.
+--   The 'preconsuming' keyword is explicit documentation of intent.
+--   It signals: "this choice MUST consume the contract — that's the design."
+--   Use it for clarity when the consuming behavior is the key semantic.
+-- ============================================================
 module Preconsuming where
 
 import Daml.Script
@@ -14,35 +29,48 @@ template SocialNetworkUser
         signatory username
         observer following
 
-        key username : Party 
-        maintainer key 
+        key username : Party
+        maintainer key
 
         ensure alias /= ""
 
-        preconsuming choice Follow: ContractId SocialNetworkUser -- Update (ContractId SocialNetworkUser)
+        -- ===== CHOICE: Follow (preconsuming) =====
+        -- DAML CONCEPT: preconsuming choice
+        -- 'preconsuming' explicitly marks this as consuming-before-body.
+        -- The contract is archived BEFORE the choice body runs.
+        -- This means: within the body, 'self' (ContractId) is already invalid.
+        -- You CANNOT call 'archive self' inside — it's already gone.
+        -- CONTRAST with nonconsuming: nonconsuming lets you conditionally archive.
+        --
+        -- WHY preconsuming: This is the natural choice for "update" operations
+        -- where you always want to replace the contract with a new version.
+        -- No risk of forgetting to archive — it's automatic.
+        preconsuming choice Follow: ContractId SocialNetworkUser
             with
                 userToFollow: Party
             controller username
-            do    
+            do
                 assertMsg "You cannot follow yourself" (userToFollow /= username)
                 assertMsg "You cannot follow the same user twice" (notElem userToFollow following)
-                
+                -- NOTE: No 'archive self' needed — preconsuming handles it.
+                -- The body just creates the replacement contract.
                 create this with following = userToFollow :: following
 
-
+        -- COMPARISON: Same logic with nonconsuming (must manually archive):
         -- nonconsuming choice Follow: ContractId SocialNetworkUser
         --     with
         --         userToFollow: Party
         --     controller username
         --     do
-        --         archive self       
-        --         assertMsg "You cannot follow yourself" (userToFollow /= username)
-        --         assertMsg "You cannot follow the same user twice" (notElem userToFollow following)
-                
-        --         create this with following = userToFollow :: following
+        --         archive self   -- must do this manually!
+        --         assertMsg ...
+        --         create this with ...
+        -- NOTE: With nonconsuming, you must be careful: if assertMsg fails
+        -- AFTER archive, the transaction rolls back and nothing happens.
+        -- With preconsuming, archive always happens FIRST.
 
 
-test = script do 
+test = script do
     alice <- allocateParty "Alice"
     bob <- allocateParty "Bob"
 
@@ -52,6 +80,9 @@ test = script do
             following = []
             alias = "test alias"
 
+    -- DAML CONCEPT: exerciseCmd
+    -- In scripts, exerciseCmd exercises a choice on a contract.
+    -- Returns the choice's return value (here: new ContractId SocialNetworkUser)
     submit alice do
-        exerciseCmd aliceCid Follow with 
+        exerciseCmd aliceCid Follow with
             userToFollow = bob

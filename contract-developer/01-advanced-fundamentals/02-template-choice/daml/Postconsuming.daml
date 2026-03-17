@@ -1,6 +1,22 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: Postconsuming
+-- PURPOSE: Compares postconsuming (body runs first, then archive)
+--          vs nonconsuming (manual archive inside body).
+-- LEARNING FOCUS: Choice consumption timing and manual archiving
+-- ============================================================
+-- POSTCONSUMING vs PRECONSUMING:
+--   preconsuming: archive happens BEFORE the body
+--   postconsuming: archive happens AFTER the body
+--
+-- WHY postconsuming matters:
+--   In the body, 'self' is still valid — you can still reference the contract.
+--   Useful when you need to pass 'self' to another contract.
+--   HOWEVER: the body must NOT create a contract with the same key
+--   (since the old one is still active during body execution).
+-- ============================================================
 module Postconsuming where
 
 
@@ -13,29 +29,49 @@ template SocialNetworkUser
         signatory username
         observer following
 
-        key username : Party 
-        maintainer key 
+        key username : Party
+        maintainer key
 
         ensure alias /= ""
 
+        -- DAML CONCEPT: postconsuming choice (commented out — shown for reference)
+        -- 'postconsuming' means the contract is archived AFTER the body runs.
+        -- The key insight: during the body, 'self' is still a valid ContractId.
+        -- However, this would FAIL here because we're trying to create a new contract
+        -- with the same key (username) while the old one still exists → key conflict!
+        --
         -- postconsuming choice Follow: ContractId SocialNetworkUser
         --     with
         --         userToFollow: Party
         --     controller username
-        --     do       
+        --     do
         --         assertMsg "You cannot follow yourself" (userToFollow /= username)
         --         assertMsg "You cannot follow the same user twice" (notElem userToFollow following)
-                
         --         create this with following = userToFollow :: following
+        -- ^^^ This would fail! Creating same-key contract before archiving the old one.
 
-
+        -- ===== CHOICE: Follow (nonconsuming + manual archive) =====
+        -- DAML CONCEPT: nonconsuming with explicit archive
+        -- 'nonconsuming' = the framework does NOT auto-archive the contract.
+        -- We manually call 'archive self' inside the body.
+        --
+        -- WHY this pattern instead of postconsuming:
+        -- We archive self FIRST, THEN create the new contract.
+        -- This avoids the key conflict that postconsuming would cause.
+        -- The benefit: we can put validation logic BEFORE or AFTER the archive.
         nonconsuming choice Follow: ContractId SocialNetworkUser
             with
                 userToFollow: Party
             controller username
-            do       
+            do
                 assertMsg "You cannot follow yourself" (userToFollow /= username)
                 assertMsg "You cannot follow the same user twice" (notElem userToFollow following)
+                -- DAML CONCEPT: archive self
+                -- 'self' is the ContractId of THIS contract.
+                -- 'archive self' marks this contract as inactive on the ledger.
+                -- Must be done BEFORE creating a contract with the same key.
                 archive self
 
                 create this with following = userToFollow :: following
+                -- NOTE: After 'archive self', the old contract is gone.
+                -- The new contract (with updated following list) becomes the active one.

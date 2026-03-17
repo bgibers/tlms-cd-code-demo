@@ -1,77 +1,177 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
+
+-- ============================================================
+-- MODULE: SwapMarket.CardIssuance
+-- PURPOSE: Defines the core card data types, issuance workflow,
+--          and the time-lock mechanism used to guarantee card
+--          availability during swap negotiations.
+-- LEARNING FOCUS: Time-based authorization, multi-party locks,
+--                 mutual-consent transfers, propose-accept issuance
+-- ============================================================
+-- WORKFLOW OVERVIEW:
+--   1. Issuer creates IssueCardProposal for a specific owner
+--   2. Owner accepts → Card contract is created (both sign)
+--   3. Owner can Transfer (to new owner, mutual consent)
+--   4. Owner can Lock (for swap proposals, requires lock.holders consent)
+--   5. Locked card can be Unlocked (by lock holders) or Expired (after deadline)
+-- ============================================================
 
 -- | A simple model of tokenized trading cards.
 module SwapMarket.CardIssuance where
 
+-- ===== DATA TYPE: CardDetails =====
+-- DAML CONCEPT: Immutable data record embedded in contracts
+-- CardDetails is pure data — it's stored inside contracts, not a contract itself.
+-- deriving Ord allows it to be used in contract keys and comparisons.
 data CardDetails = CardDetails with
     issuer : Party
     details : Text
   deriving (Show, Eq, Ord)
 
+
+-- ===== TEMPLATE: IssueCardProposal =====
+-- PATTERN: Propose-Accept for card issuance.
+-- The issuer unilaterally proposes; the owner must accept (mutual consent for Card).
+-- NOTE: This is minimal scaffolding — a production implementation would add
+-- cancellation, rejection, expiry, and validation logic.
+--
 -- | Utility contract to propose a card issuance to an owner.
---   Note: This contract is the minimal scaffolding to create a card on the ledger. It is missing all the validation,
---         cancellation, and rejection logic we would expect to see if we did an analysis of the "issue card" workflow.
+--   Note: This contract is the minimal scaffolding to create a card on the ledger.
 template IssueCardProposal
   with
     cardDetails : CardDetails -- ^ Details of a new card being issued
     owner : Party             -- ^ Proposed owner of the new card
   where
+    -- AUTH: Only the issuer signs the proposal.
+    -- WHY: Issuer creates the proposal unilaterally; owner decides whether to accept.
     signatory cardDetails.issuer
+
+    -- PRIVACY: Owner can see the proposal to decide whether to accept.
     observer owner
-    
+
+    -- ===== CHOICE: IssueCardProposal_Accept =====
+    -- Owner accepts → Card contract created with BOTH owner and issuer signing.
+    -- WHY mutual-consent Card: both issuer and owner are stakeholders in the card.
+    -- The issuer "issued" it (they're responsible for its existence).
+    -- The owner "holds" it (they have the property right).
     choice IssueCardProposal_Accept : ContractId Card
-      controller owner
+      controller owner   -- owner provides their consent here
       do
+        -- DAML CONCEPT: create with specific fields
+        -- 'create Card with owner; cardDetails'
+        -- Both owner and cardDetails.issuer are now signatories of the Card.
         create Card with owner; cardDetails
 
+
+-- ===== DATA TYPE: TimeLock =====
+-- DAML CONCEPT: Embedded data type for time-based authorization
+-- A TimeLock specifies WHO holds the lock and WHEN it expires.
+-- Used to guarantee card availability during swap negotiations.
+--
+-- WHY locks: When Alice proposes to swap her card for Bob's, Bob needs assurance
+-- that Alice can't transfer the card away before accepting the swap.
+-- Locking Alice's card to the swap proposal guarantees settlement is possible.
+--
 -- | A lock held by multiple parties until its expiry.
 data TimeLock = TimeLock with
+    -- DAML CONCEPT: Multi-party lock
+    -- Multiple parties (provider, offerer, proposer) all hold the lock jointly.
+    -- ALL of them must authorize LockedCard_Unlock.
+    -- Any ONE of them can expire the lock after deadline.
     holders : [Party]
-    expiresAt : Time
+    expiresAt : Time   -- the lock automatically expires after this time
   deriving (Eq, Show)
 
+
+-- ===== TEMPLATE: Card =====
+-- The main card contract — represents ownership of a trading card.
+-- Created when an IssueCardProposal is accepted.
+--
 -- | A tokenized card that can be transferred and locked.
 template Card
   with
     owner : Party             -- ^ Owner of the card
-    cardDetails : CardDetails -- ^ Details of the card
+    cardDetails : CardDetails -- ^ Details of the card (includes issuer)
   where
+    -- AUTH: Both owner and issuer must be signatories.
+    -- WHY: The card is a mutual commitment — issuer vouches for authenticity,
+    -- owner has the property right. Both are "responsible" for this card existing.
     signatory owner, cardDetails.issuer
 
+    -- ===== CHOICE: Card_Transfer =====
+    -- PATTERN: Mutual-consent transfer
+    -- BOTH the current owner AND the new owner must authorize.
+    -- WHY: Prevents spam/unwanted transfers. New owner must WANT the card.
+    -- This prevents someone sending you cards (and thus obligations) without consent.
     choice Card_Transfer : ContractId Card
       with
         newOwner : Party  -- ^ New owner
-      controller owner, newOwner
+      controller owner, newOwner   -- BOTH must sign
       do
         create this with owner = newOwner
-    
+
+    -- ===== CHOICE: Card_Lock =====
+    -- Locks the card to a set of lock holders until a deadline.
+    -- Creates a LockedCard contract — the Card is archived (consumed).
+    -- WHY: During swap negotiation, the proposer's card is locked to prevent
+    -- it from being transferred away before the swap is settled.
+    -- PATTERN: The lock holders (provider, offerer, proposer) all must agree
+    -- to lock AND to unlock — full joint control over the locked asset.
     choice Card_Lock : ContractId LockedCard
       with
-        lock: TimeLock  -- ^ Details of the requested lock
+        lock: TimeLock  -- ^ Details of the requested lock (holders + expiry)
+      -- AUTH: Both the card owner AND all lock holders must authorize the lock.
+      -- owner must agree to give up control temporarily.
+      -- lock.holders must agree to take on the lock responsibility.
       controller owner, lock.holders
       do
-        create LockedCard with card = this; lock 
+        create LockedCard with card = this; lock
 
+
+-- ===== TEMPLATE: LockedCard =====
+-- A card that has been locked by a group of parties until a deadline.
+-- While locked, neither the owner nor the issuer can transfer it unilaterally.
+-- The lock holders have joint control.
+--
 -- | A card locked to the control of a set of lock holders for a specific amount of time.
 template LockedCard
   with
-    card : Card     -- ^ Details of the locked card
-    lock : TimeLock -- ^ Details of the lock
+    card : Card     -- ^ Details of the locked card (includes owner and issuer)
+    lock : TimeLock -- ^ Details of the lock (holders and expiry)
   where
+    -- DAML CONCEPT: Combined signatory lists
+    -- lock.holders AND signatory card = [lock.holders..., owner, issuer]
+    -- All lock holders AND the original card's signatories are required.
+    -- WHY: The lock represents a joint agreement — all parties committed to it.
     signatory lock.holders, signatory card
-    
+
+    -- ===== CHOICE: LockedCard_Unlock =====
+    -- Lock holders jointly unlock the card (before expiry).
+    -- WHY: If the swap is rejected or withdrawn, lock holders unlock the card
+    -- so the owner can use it again.
+    -- REQUIRES: ALL lock holders to authorize (controller = list of all holders)
     choice LockedCard_Unlock : ContractId Card
       controller lock.holders
       do
-        create card
-    
+        create card   -- recreate the Card (unlocked)
+
+    -- ===== CHOICE: LockedCard_LockExpire =====
+    -- Any stakeholder can expire the lock AFTER the deadline has passed.
+    -- WHY: Cleanup mechanism. If a swap proposal expires, the card shouldn't
+    -- remain permanently locked. Any stakeholder can trigger expiry.
+    -- 'actor' is flexible — not just lock holders; the owner can expire too.
     choice LockedCard_LockExpire : ContractId Card
       with
         actor: Party  -- ^ Any stakeholder of this contract
       controller actor
       do
+        -- DAML CONCEPT: getTime
+        -- 'getTime' returns the current ledger time as a Time value.
+        -- Ledger time is monotonic and controlled by the ledger — not the user.
         now <- getTime
+        -- 'stakeholder' returns all signatories + observers of 'this'
         assertMsg "Actor is stakeholder" (actor `elem` stakeholder this)
+        -- Lock must have expired before this choice can be exercised.
         assertMsg "Lock expired" (lock.expiresAt <= now)
-        create card
+        create card   -- recreate the Card (lock expired)

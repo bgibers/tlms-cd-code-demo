@@ -17,6 +17,25 @@ This repository has been created to assist you in enhancing your comprehension o
     + [2. Authorization & Privacy](./contract-developer/02-auth-n-privacy/)
     + [3. Nonfunctional Requirements](./contract-developer/03-nonfunctional-requirements/)
 
+## 📚 Learning Guide
+
+**New to Daml?** Start with the comprehensive learning guide:
+
+👉 **[DAML-LEARNING-GUIDE.md](./DAML-LEARNING-GUIDE.md)**
+
+It covers:
+- Suggested learning path through the repo
+- Complete concept reference table (every keyword with examples)
+- Authorization and privacy model explained
+- All design patterns with file references
+- How to run the examples
+
+Every `.daml` file in this repo has been annotated with educational comments using markers like:
+- `-- DAML CONCEPT:` — explains a language feature
+- `-- WHY:` — explains a design decision
+- `-- PATTERN:` — identifies a reusable design pattern
+- `-- AUTH:` / `-- PRIVACY:` — authorization and privacy notes
+
 ## Intentional Errors in Code Demos
 Please note that deliberate errors may be present in the code demos to highlight specific error scenarios to the audience. If you encounter errors in the code, please refer to the corresponding video lesson on TLMS to confirm whether the error is intentional or not before making a pull request to fix it.
 

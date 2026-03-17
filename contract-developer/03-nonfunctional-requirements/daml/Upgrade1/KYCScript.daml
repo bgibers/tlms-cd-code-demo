@@ -1,17 +1,34 @@
-module Upgrade1.KYCScript where 
+-- ============================================================
+-- MODULE: Upgrade1.KYCScript
+-- PURPOSE: Test script showing KYC creation alongside existing Position contracts.
+--          Demonstrates the additive upgrade: existing initCash state + new KYC contract.
+-- LEARNING FOCUS: Script composition across modules, additive upgrades in practice
+-- ============================================================
+module Upgrade1.KYCScript where
 
 import Upgrade1.KYC
 import InitialState.Scripts
 import Daml.Script
 
-testKYC: Script() 
-testKYC = do 
+-- ===== TEST: KYC with existing cash state =====
+-- DAML CONCEPT: Script composition across packages
+-- `initCash` sets up the initial Position/TransferProposal state (from InitialState).
+-- Then we ADD a KYC contract for Alice — the existing Position contracts are UNCHANGED.
+-- This shows how you add new features to a live system without touching existing data.
+testKYC: Script()
+testKYC = do
 
+    -- Get existing state: parties (pBank, pAlice, pBob) and users (uBank, uAlice, uBob)
+    -- After initCash: Alice has 5 Position contracts, Bob has 3 Position contracts
     (tps@TestParties{..}, tus@TestUsers{..}) <- initCash
-    submitUser uBank do 
-        createCmd KYC with 
-            bank = pBank 
-            counterParty = pAlice 
-            address = "Earth" 
+
+    -- ADDITIVE UPGRADE: Bank creates a KYC record for Alice
+    -- This is a NEW contract type on the same ledger.
+    -- Alice's 5 Position contracts are UNAFFECTED.
+    submitUser uBank do
+        createCmd KYC with
+            bank = pBank
+            counterParty = pAlice
+            address = "Earth"
 
     return ()

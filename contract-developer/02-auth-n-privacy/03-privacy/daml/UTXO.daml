@@ -1,13 +1,41 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: UTXO
+-- PURPOSE: Demonstrates the UTXO (Unspent Transaction Output)
+--          asset model — each asset is a discrete contract.
+-- LEARNING FOCUS: UTXO vs balance model, split/merge operations
+-- ============================================================
+-- UTXO MODEL vs BALANCE MODEL:
+--   Balance model (AccountBalance.daml): One asset per issuer-owner pair,
+--     amounts are updated by modifying the single record.
+--   UTXO model (this file): Each asset is a SEPARATE contract.
+--     Transfer = archive source + create target.
+--     Merge = combine two UTXOs into one.
+--     Split = divide one UTXO into two.
+-- WHY UTXO:
+--   - Privacy: owning 3 UTXOs doesn't reveal the total (unless you're an observer of all)
+--   - Parallelism: independent UTXOs can be processed concurrently
+--   - Traceability: each UTXO has a clear provenance history
+-- ============================================================
 module UTXO where
 
+-- ===== DATA TYPE: SplitResult =====
+-- DAML CONCEPT: Returning multiple values from a choice
+-- Choices can only return ONE value. To return multiple ContractIds,
+-- wrap them in a data record.
+-- WHY: Asset_Split creates TWO new contracts — we need to return both IDs.
 data SplitResult = SplitResult with
-  splitAsset: ContractId Asset
-  remainder: ContractId Asset
+  splitAsset: ContractId Asset     -- the portion that was split off
+  remainder: ContractId Asset      -- the remaining portion
     deriving (Eq, Show)
 
+
+-- ===== TEMPLATE: Asset =====
+-- An asset in the UTXO model.
+-- NOTE: No contract key here — multiple Assets can exist for the same issuer-owner pair.
+-- This is the key difference from AccountBalance.daml.
 template Asset
   with
     issuer: Party
@@ -15,60 +43,100 @@ template Asset
     amount: Decimal
   where
     signatory issuer, owner
-    ensure amount > 0.0 
+    ensure amount > 0.0   -- all UTXOs must have positive value
 
-    choice Asset_Transfer: ContractId AssetTransferProposal 
+    -- ===== CHOICE: Asset_Transfer =====
+    -- UTXO transfer: archive this contract, create a TransferProposal.
+    -- The ENTIRE amount goes to the recipient (no residual).
+    -- WHY: In UTXO model, you spend the whole UTXO and create change if needed.
+    choice Asset_Transfer: ContractId AssetTransferProposal
       with
         recipient: Party
       controller owner
       do
+        -- No residual asset created here!
+        -- The entire UTXO is consumed and represented by the proposal.
         create AssetTransferProposal with
-          asset = this
+          asset = this   -- embed the full Asset record in the proposal
           recipient
 
+    -- ===== CHOICE: Asset_Merge =====
+    -- Combines TWO UTXOs into ONE.
+    -- WHY: You might receive multiple small UTXOs; merge them for easier management.
+    -- Validates that both UTXOs have the same issuer and owner.
     choice Asset_Merge: ContractId Asset
       with
-        otherAssetCid: ContractId Asset
+        otherAssetCid: ContractId Asset   -- the UTXO to merge into this one
       controller owner
       do
+        -- DAML CONCEPT: fetch to read another contract's data
         otherAsset <- fetch otherAssetCid
 
+        -- Validate merge preconditions
         assertMsg "Merge failed: issuer does not match" (issuer == otherAsset.issuer)
         assertMsg "Merge failed: owner does not match" (owner == otherAsset.owner)
 
+        -- Archive the other UTXO (it's being consumed by the merge)
         archive otherAssetCid
-        create this with
-          amount = amount + otherAsset.amount
 
+        -- Create new merged UTXO (this consuming choice archives the current one automatically)
+        create this with
+          amount = amount + otherAsset.amount   -- sum the amounts
+
+    -- ===== CHOICE: Asset_Split =====
+    -- Divides ONE UTXO into TWO.
+    -- WHY: You want to spend 30 of a 100-unit UTXO; split into 30 + 70.
+    -- Returns SplitResult with both new ContractIds.
     choice Asset_Split: SplitResult
       with
-        splitAmount: Decimal
+        splitAmount: Decimal   -- how much to split off
       controller owner
       do
+        -- Create the split-off portion
         splitAsset <- create this with
           amount = splitAmount
+
+        -- Create the remainder
         remainder <- create this with
           amount = amount - splitAmount
+          -- Validation: ensure clause prevents negative remainders (amount - splitAmount > 0)
+          -- If splitAmount >= amount, this create fails (ensure amount > 0.0)
+
+        -- Return both ContractIds wrapped in SplitResult
         pure SplitResult with
           splitAsset
           remainder
 
+
+-- ===== TEMPLATE: AssetTransferProposal =====
+-- Pending transfer awaiting recipient's response.
 template AssetTransferProposal
   with
-    asset: Asset
+    asset: Asset     -- the full Asset record (UTXO) being transferred
     recipient: Party
   where
+    -- DAML CONCEPT: Derived signatories
+    -- signatory (signatory asset) = take the signatories of the Asset record
+    -- = [issuer, owner] — same auth as the original asset.
     signatory (signatory asset)
+
+    -- PRIVACY: Recipient can see the proposal.
     observer recipient
+
     ensure asset.amount > 0.0
 
+    -- ===== CHOICE: AssetTransferProposal_Accept =====
     choice AssetTransferProposal_Accept: ContractId Asset
       controller recipient
       do
+        -- Create a new Asset with recipient as the new owner.
+        -- 'asset with owner = recipient' copies all fields but changes owner.
         create asset with
           owner = recipient
 
+    -- ===== CHOICE: AssetTransferProposal_Reject =====
+    -- Reject: return the UTXO to the original owner.
     choice AssetTransferProposal_Reject: ContractId Asset
       controller recipient
       do
-        create asset
+        create asset   -- recreate with original owner (asset.owner unchanged)

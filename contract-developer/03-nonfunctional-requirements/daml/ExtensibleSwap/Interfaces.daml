@@ -1,58 +1,122 @@
-module ExtensibleSwap.Interfaces where 
+-- ============================================================
+-- MODULE: ExtensibleSwap.Interfaces
+-- PURPOSE: Defines Daml INTERFACES for assets and transfer proposals.
+--          Interfaces enable POLYMORPHIC contract handling — write code
+--          that works with ANY asset type (Cash, Bond, etc.) without
+--          knowing the concrete type at compile time.
+-- LEARNING FOCUS: Daml interfaces (like OOP interfaces but for contracts)
+-- ============================================================
+-- DAML INTERFACES:
+--   An interface defines a contract BEHAVIOR CONTRACT:
+--     - What data the "view" exposes (viewtype)
+--     - What methods can transform the interface value
+--     - What choices can be exercised on any implementor
+--
+--   Concrete templates IMPLEMENT interfaces:
+--     - 'interface instance IAsset for Cash where'
+--     - Must provide all methods and the view function
+--
+--   Callers use INTERFACE CONTRACT IDS:
+--     - ContractId IAsset — works with Cash, Bond, or any IAsset implementor
+--     - Exercise interface choices without knowing the concrete type
+--
+-- ANALOGY: Like Java's List<T> — you can call add() without knowing if it's
+--   an ArrayList or LinkedList underneath.
+-- ============================================================
+module ExtensibleSwap.Interfaces where
 
-------------------
-data VAsset = VAsset with 
-  issuer : Party 
-  owner : Party 
+-- ===== VIEWTYPE: VAsset =====
+-- DAML CONCEPT: Interface viewtype
+-- Every interface must declare a 'viewtype' — a record that represents
+-- the "public view" of the interface.
+-- Calling 'view contract' on an interface ContractId returns this record.
+-- WHY: Interfaces don't have direct field access like templates do.
+-- The view is the standardized way to read an interface contract's data.
+data VAsset = VAsset with
+  issuer : Party
+  owner : Party
   obs: [Party]
-  quantity: Decimal 
-  assetType: Text 
-    
-interface IAsset where 
-  viewtype VAsset 
-  setOwner: Party -> IAsset 
-  setObs: [Party] -> IAsset
-  setQuantity : Decimal -> IAsset
-  transferTo: Party -> ITransferProposal
+  quantity: Decimal
+  assetType: Text   -- e.g., "Cash" or "Bond" — identifies the concrete type
 
+-- ===== INTERFACE: IAsset =====
+-- DAML CONCEPT: interface keyword
+-- Defines an interface named IAsset.
+-- Any template can implement IAsset by providing the required methods and view.
+interface IAsset where
+  -- DAML CONCEPT: viewtype declaration
+  -- Specifies which data record 'view this' returns.
+  -- All IAsset implementations return a VAsset.
+  viewtype VAsset
+
+  -- DAML CONCEPT: Interface methods (not choices!)
+  -- Methods are functions on the interface value — they return transformed interface values.
+  -- They're NOT recorded on the ledger — they're pure transformations.
+  -- Implementors must provide these as Daml functions.
+  setOwner: Party -> IAsset       -- create a new IAsset with a different owner
+  setObs: [Party] -> IAsset       -- create a new IAsset with different observers
+  setQuantity : Decimal -> IAsset  -- create a new IAsset with different quantity
+  transferTo: Party -> ITransferProposal  -- create a transfer proposal to newOwner
+
+  -- ===== INTERFACE CHOICE: ProposeTransfer =====
+  -- DAML CONCEPT: Interface choice
+  -- Choices defined on an interface are available on ALL implementors.
+  -- '(view this).owner' calls view on the interface value to get the owner.
+  -- This works because any IAsset has a VAsset view with an owner field.
   choice ProposeTransfer: ContractId ITransferProposal
-    with 
-      newOwner: Party 
-    controller (view this).owner 
-    do 
-      create $ transferTo this newOwner     
+    with
+      newOwner: Party
+    controller (view this).owner
+    do
+      -- 'transferTo this newOwner' calls the interface method
+      -- 'create $ ...' creates the resulting ITransferProposal on the ledger
+      create $ transferTo this newOwner
 
-  choice Transfer: ContractId IAsset 
-    with 
-      newOwner: Party 
+  -- ===== INTERFACE CHOICE: Transfer =====
+  -- DAML CONCEPT: Multi-controller interface choice
+  -- controller [(view this).owner, newOwner] — BOTH must authorize.
+  -- This is the mutual-consent transfer pattern applied to any asset type.
+  choice Transfer: ContractId IAsset
+    with
+      newOwner: Party
     controller [(view this).owner, newOwner]
-    do 
+    do
+      -- setObs clears observers, setOwner changes owner, then creates new contract
       create $ setOwner (setObs this []) newOwner
 
-  choice SetObservers: ContractId IAsset 
-    with 
+  -- ===== INTERFACE CHOICE: SetObservers =====
+  -- Allows the owner to add/remove observers on any IAsset implementor.
+  choice SetObservers: ContractId IAsset
+    with
       newObs: [Party]
-    controller (view this).owner 
-    do 
-      create $ setObs this newObs 
+    controller (view this).owner
+    do
+      create $ setObs this newObs
 
 
------------------
-data VTransferProposal = VTransferProposal with 
-  vasset : VAsset 
-  newOwner: Party 
+-- ===== VIEWTYPE: VTransferProposal =====
+-- The view data for transfer proposals.
+-- Includes the asset view and the intended new owner.
+data VTransferProposal = VTransferProposal with
+  vasset : VAsset    -- view of the asset being transferred
+  newOwner: Party    -- who will own it after acceptance
 
-interface ITransferProposal where 
+-- ===== INTERFACE: ITransferProposal =====
+-- Interface for any transfer proposal.
+-- Allows the swap logic to accept/handle proposals of any asset type.
+interface ITransferProposal where
   viewtype VTransferProposal
+
+  -- DAML CONCEPT: Interface method returning an interface value
+  -- 'asset this' returns the IAsset being proposed for transfer.
   asset: IAsset
 
-  choice AcceptTransfer: ContractId IAsset 
+  -- ===== INTERFACE CHOICE: AcceptTransfer =====
+  -- Recipient accepts the transfer.
+  -- Works regardless of whether the underlying asset is Cash or Bond.
+  choice AcceptTransfer: ContractId IAsset
     controller (view this).newOwner
-    do 
+    do
+      -- setOwner on the asset changes its owner to newOwner
+      -- create registers the result on the ledger
       create $ setOwner (asset this) (view this).newOwner
-
-
----------------
-
-
-        

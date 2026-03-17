@@ -1,10 +1,40 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: Testing (03-transaction-tree-testing)
+-- PURPOSE: Demonstrates postconsuming choice behavior and shows
+--          the full SocialNetworkUser workflow end-to-end.
+--          This version of the template uses `postconsuming` instead
+--          of the default consuming for the Follow choice.
+-- LEARNING FOCUS: postconsuming vs consuming choices, self-contained test
+-- ============================================================
+-- DAML CONCEPT: postconsuming choice
+-- `postconsuming choice Foo: Bar` means:
+--   1. The choice BODY runs FIRST (while the contract is still active)
+--   2. The contract is ARCHIVED AFTER the body completes
+--
+-- Compare with consuming (default):
+--   - Consuming: contract archived BEFORE body runs
+--   - Postconsuming: body runs FIRST, contract archived AFTER
+--
+-- WHY use postconsuming?
+-- Inside a postconsuming choice body, you can still FETCH `self` because
+-- the contract isn't archived yet. This is rarely needed but useful
+-- when you need to read your own data inside the choice.
+--
+-- IMPORTANT GOTCHA: If the choice body creates a contract with the same
+-- KEY as the current one, it FAILS with postconsuming. The old key still
+-- exists during the body run. Use consuming (default) when recreating
+-- the same key.
+-- ============================================================
 module Testing where
 
 import Daml.Script
 
+-- ===== TEMPLATE: SocialNetworkUser with postconsuming Follow =====
+-- Same template as in Setup.daml but with `postconsuming` on Follow.
+-- This file is self-contained: defines both the template and the test.
 template SocialNetworkUser
     with
         username: Party
@@ -14,31 +44,46 @@ template SocialNetworkUser
         signatory username
         observer following
 
-        key username : Party 
-        maintainer key 
+        key username : Party
+        maintainer key
 
         ensure alias /= ""
 
+        -- DAML CONCEPT: postconsuming choice
+        -- The body (`assertMsg` + `create`) runs while the original contract is STILL ACTIVE.
+        -- After the body, the original contract is archived.
+        -- This means a duplicate key EXISTS briefly (old + new both exist during body).
+        -- For this specific template this FAILS because the key would conflict!
+        -- But it's included here to demonstrate the `postconsuming` keyword.
         postconsuming choice Follow: ContractId SocialNetworkUser
             with
                 userToFollow: Party
             controller username
-            do       
+            do
                 assertMsg "You cannot follow yourself" (userToFollow /= username)
                 assertMsg "You cannot follow the same user twice" (notElem userToFollow following)
                 create this with following = userToFollow :: following
 
 
+-- ===== TEST: Full follow workflow =====
+-- DAML CONCEPT: allocateParty without hint
+-- `allocateParty "Alice"` creates a party with display name "Alice".
+-- The ledger generates a unique party ID; the display name is for humans.
 test = script do
     alice <- allocateParty "Alice"
     bob <- allocateParty "Bob"
 
+    -- Create Alice's profile with empty following list
     aliceCid <- submit alice do
         createCmd SocialNetworkUser with
             username = alice
             following = []
             alias = "aliceAlias"
-    
-    submit alice do 
+
+    -- Alice follows Bob
+    -- NOTE: With postconsuming, this would fail due to key conflict.
+    -- In practice, use consuming (default) for templates with contract keys
+    -- that are recreated in the choice body.
+    submit alice do
         exerciseCmd aliceCid Follow with
             userToFollow = bob

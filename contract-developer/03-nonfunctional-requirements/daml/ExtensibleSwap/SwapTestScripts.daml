@@ -1,4 +1,24 @@
-module ExtensibleSwap.SwapTestScripts where 
+-- ============================================================
+-- MODULE: ExtensibleSwap.SwapTestScripts
+-- PURPOSE: Tests the extensible swap system using interfaces.
+--          Demonstrates how to create assets via transfer proposals,
+--          accept them via interface ContractIds, and settle a swap
+--          using the polymorphic AssetSwapProposal.
+-- LEARNING FOCUS: replicateA_, toInterfaceContractId, queryFilter,
+--                 interface-based contract operations, forA_ with queries
+-- ============================================================
+-- PATTERN: Interface-based testing
+-- Rather than casting to specific types (Cash, Bond), the test uses:
+--   toInterfaceContractId @ITransferProposal proposal._1
+-- This tests that the interface dispatch works correctly:
+-- Any contract implementing ITransferProposal can be accepted via
+-- the interface choice AcceptTransfer — regardless of concrete type.
+--
+-- Why this matters:
+-- If you later add a new asset type (e.g., Stock), the same test
+-- script and swap logic work without modification.
+-- ============================================================
+module ExtensibleSwap.SwapTestScripts where
 
 import Daml.Script
 
@@ -9,11 +29,15 @@ import ExtensibleSwap.Swap
 import DA.Action (replicateA_)
 import DA.Foldable (forA_)
 
+-- ===== TEST FIXTURE =====
 data TestParties = TestParties with
   pBank : Party
   pAlice : Party
   pBob : Party
 
+-- DAML CONCEPT: allocatePartyWithHint
+-- Creates a party where the ledger TRIES to use the hint as the party ID.
+-- `PartyIdHint "Bank"` → party ID will include "Bank" (makes logs readable).
 initParties : Script TestParties
 initParties = do
   let allocate t = allocatePartyWithHint t (PartyIdHint t)
@@ -23,24 +47,29 @@ initParties = do
 
   return (TestParties with ..)
 
+-- ===== ASSET INITIALIZATION =====
+-- Distributes Cash to Alice and Bonds to Bob via transfer proposals.
 initAssets : Script TestParties
 initAssets = do
   ps@TestParties{..} <- initParties
 
-  let 
-    cash = Cash with 
+  let
+    cash = Cash with
       issuer = pBank
-      owner = pBank 
+      owner = pBank
       obs = []
       quantity = 1.0
 
-  let 
-    bond = Bond with 
+  let
+    bond = Bond with
       issuer = pBank
-      owner = pBank 
+      owner = pBank
       obs = []
       quantity = 1.0
 
+  -- DAML CONCEPT: replicateA_ n action
+  -- Runs the same Script action `n` times, discarding results.
+  -- Creates 5 separate Cash contracts (each quantity=1.0) for Alice.
   -- 5 cash of $1 for Alice
   replicateA_ 5 $ submit pBank do
     createCmd CashTransferProposal with
@@ -52,51 +81,66 @@ initAssets = do
     createCmd BondTransferProposal with
         newOwner = pBob
         bond
-  
-      -- Accept all transfer proposals
-  aliceProposals <- query @CashTransferProposal pAlice 
+
+  -- Accept all transfer proposals via INTERFACE
+  -- DAML CONCEPT: toInterfaceContractId @ITransferProposal cid
+  -- Upcasts a concrete ContractId (CashTransferProposal) to an interface ContractId.
+  -- After this, you can exercise ANY choice defined on ITransferProposal,
+  -- regardless of whether the contract is CashTransferProposal or BondTransferProposal.
+  aliceProposals <- query @CashTransferProposal pAlice
   submit pAlice do
-    forA_ aliceProposals (\proposal -> do 
+    forA_ aliceProposals (\proposal -> do
       exerciseCmd (toInterfaceContractId @ITransferProposal proposal._1) AcceptTransfer)
 
-  bobProposals <- query @BondTransferProposal pBob 
-  submit pBob do 
-    forA_ bobProposals (\proposal -> do 
+  bobProposals <- query @BondTransferProposal pBob
+  submit pBob do
+    forA_ bobProposals (\proposal -> do
       exerciseCmd (toInterfaceContractId @ITransferProposal proposal._1) AcceptTransfer)
 
   return (ps)
 
-testSwap : Script () 
-testSwap = do 
+-- ===== SWAP TEST =====
+-- Tests that Alice (Cash) can swap with Bob (Bond) using the interface-based swap.
+testSwap : Script ()
+testSwap = do
 
-  ps@TestParties{..} <- initAssets 
+  ps@TestParties{..} <- initAssets
 
-  -- Alice gets one Cash asset to swap
-  (cid, cash)::_ <- query @Cash pAlice 
+  -- Alice gets one Cash asset to offer
+  -- DAML CONCEPT: list pattern match in let
+  -- `(cid, cash)::_` destructures the result of query @Cash:
+  --   First element: (ContractId Cash, Cash) — the contract we want
+  --   `::_` ignores the rest of the list (assumes at least one exists)
+  (cid, cash)::_ <- query @Cash pAlice
 
-  --Alice add Bob as an observer
-  cid <- submit pAlice do 
+  -- Alice adds Bob as an observer so Bob can verify Alice's Cash in the swap
+  -- DAML CONCEPT: toInterfaceContractId @IAsset
+  -- SetObservers is defined on IAsset (the interface), not on Cash directly.
+  -- We upcast to IAsset to call this interface choice.
+  cid <- submit pAlice do
     exerciseCmd (toInterfaceContractId @IAsset cid) SetObservers with newObs = [pBob]
 
-  --Prepare swap specs
-  let 
+  -- Prepare swap specs: (issuer, assetType, quantity)
+  let
     offerSpec = (pBank, "Cash", cash.quantity)
-    requestedSpec = (pBank, "Bond", cash.quantity) 
+    requestedSpec = (pBank, "Bond", cash.quantity)
 
-  --Alice creates SwapProposal
-  swapProposalCid <- submit pAlice do 
-    createCmd AssetSwapProposal with 
-      requester = pAlice 
-      receiver = pBob 
+  -- Alice creates the swap proposal
+  swapProposalCid <- submit pAlice do
+    createCmd AssetSwapProposal with
+      requester = pAlice
+      receiver = pBob
       offerSpec
       requestedSpec
-      offerCid = toInterfaceContractId @IAsset cid 
+      offerCid = toInterfaceContractId @IAsset cid   -- Interface ContractId!
 
-  --Bob gets a bond as per the spec  
+  -- Bob finds a bond matching the spec
+  -- DAML CONCEPT: queryFilter @T party predicate
+  -- Returns all contracts of type T visible to party WHERE predicate is True.
   (cid, _)::_ <- queryFilter @Bond pBob (\bond -> bond.owner == pBob && bond.quantity == requestedSpec._3)
-  
-  --Bob Settles the swap
-  submit pBob do 
+
+  -- Bob settles the swap — ATOMIC EXCHANGE via interfaces
+  submit pBob do
     exerciseCmd swapProposalCid Settle with requestedCid = toInterfaceContractId @IAsset cid
 
 

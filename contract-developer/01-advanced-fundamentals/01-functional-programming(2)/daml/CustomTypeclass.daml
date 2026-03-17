@@ -1,71 +1,75 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: CustomTypeclass
+-- PURPOSE: Shows how to define custom typeclasses and instances,
+--          including a custom Show instance and a Hashable class.
+-- LEARNING FOCUS: Ad-hoc polymorphism via typeclasses
+-- ============================================================
+-- ANALOGY: Typeclasses are like interfaces in Java/Go:
+--   - 'class Hashable i o' defines the interface
+--   - 'instance Hashable PersonalRecord Text' implements it
+-- Unlike OOP interfaces, typeclasses are open — you can add
+-- new instances for existing types without modifying them.
+-- ============================================================
 module CustomTypeclass where
 
 import Daml.Script
+-- DAML CONCEPT: Import specific function from module
+-- DA.Text provides sha256 for hashing text
 import DA.Text (sha256)
 
+-- ===== DATA TYPE =====
+-- A simple record type for personal identity data.
 data PersonalRecord = PersonalRecord with
     name : Text
     id : Int
-    -- func: Text -> Text
-        -- deriving (Show, Eq)
+    -- Note: function fields are commented out — Daml contracts can't store functions
 
+-- ===== CUSTOM SHOW INSTANCE =====
+-- DAML CONCEPT: Typeclass instance
+-- 'instance Show PersonalRecord' tells Daml how to convert PersonalRecord to Text.
+-- The 'show' function calls this when printing values.
+-- Pattern match destructuring: 'PersonalRecord {name, id}' unpacks the fields.
+-- WHY custom Show: the default deriving would expose all fields; custom Show lets you
+--   control the format (e.g., mask the id for privacy).
 instance Show PersonalRecord where
-    show PersonalRecord {name,id} = "PersonalRecord {name = " <> show name <> ", id = 123" <> show id <> "}"
+    show PersonalRecord {name,id} =
+        "PersonalRecord {name = " <> show name <> ", id = 123" <> show id <> "}"
+        -- <> is string concatenation in Daml
 
+-- ===== CUSTOM TYPECLASS: Hashable =====
+-- DAML CONCEPT: Typeclass definition
+-- 'class Hashable i o' defines a new typeclass named Hashable.
+-- It takes TWO type parameters: 'i' (input type) and 'o' (output type).
+-- The class body declares the METHODS that instances must implement.
+-- 'hash' is a method: takes an 'i', returns an 'o'.
+-- WHY TWO parameters: different input types might produce different output types
+--   (e.g., hash a record → Text, hash a number → Int)
 class Hashable i o where
     hash : i -> o
 
 
-instance Hashable PersonalRecord Text where 
+-- DAML CONCEPT: Typeclass instance implementation
+-- 'instance Hashable PersonalRecord Text' says:
+--   "PersonalRecord is Hashable, and its hash output is Text"
+-- The 'hash' implementation concatenates name+id and applies SHA-256 hashing.
+-- sha256 : Text -> Text — produces a 64-character hex string
+-- WHY useful in contracts: can hash sensitive data for privacy-preserving verification
+instance Hashable PersonalRecord Text where
     hash myRecord = sha256 (myRecord.name <> show(myRecord.id))
 
 
--- test = script do
---     let 
---         someData = PersonalRecord with
---             name = "Alice"
---             id = 123
-
---     debug $ someData
-
-
 test = script do
-    let 
+    let
         someData = PersonalRecord with
             name = "Alice"
             id = 123
-    
+
+        -- 'hash someData' calls our Hashable instance above
         hashedData : Text
         hashedData = hash someData
 
-    debug $ someData
-    debug $ hashedData
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
--- instance Show PersonalRecord where
---     show PersonalRecord {name,id} = "PersonalRecord {name = " <> show name <> ", id = 123" <> show id <> "}"
---     -- show myRecord = "PersonalRecord {name = " <> show myRecord.name <> ", id = 123" <> show myRecord.id <> "}"
---     -- show PersonalRecord{name,id} = "PersonalRecord {name = " <> show name <> ", id = 123" <> show id <> ", func = <function>}"
-
-
+    debug $ someData      -- uses our custom Show instance
+    debug $ hashedData    -- a 64-char SHA-256 hex string

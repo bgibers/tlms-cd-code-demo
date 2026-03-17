@@ -1,19 +1,75 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: TemplateStructure
+-- PURPOSE: Shows the minimal anatomy of a Daml template —
+--          all the structural components a template can have.
+-- LEARNING FOCUS: Template skeleton before adding choices
+-- ============================================================
+-- TEMPLATE ANATOMY:
+--   template <Name>
+--     with
+--       field1: Type1      <- contract fields (the state)
+--       field2: Type2
+--     where
+--       signatory <expr>   <- who must authorize creation
+--       observer <expr>    <- who can see it (read-only)
+--       key <expr> : Type  <- unique identifier (optional)
+--       maintainer <expr>  <- who is responsible for key uniqueness
+--       ensure <bool>      <- creation precondition (optional)
+--       choice ...         <- operations that can be performed
+-- ============================================================
 module TemplateStructure where
 
 
+-- ===== TEMPLATE: SocialNetworkUser =====
+-- A user profile on a social network. Each user has one contract.
 template SocialNetworkUser
     with
+        -- DAML CONCEPT: Party field
+        -- A Party represents a participant on the Canton ledger.
+        -- Parties are identified by a cryptographic key, not just a name.
         username: Party
+
+        -- DAML CONCEPT: List field
+        -- [Party] = a list of parties this user follows.
+        -- Lists in contracts can be empty ([]) or have any number of elements.
         following: [Party]
+
+        -- Simple text field
         alias: Text
     where
+        -- DAML CONCEPT: signatory
+        -- The signatory is the party whose authority is required to:
+        --   1. Create this contract
+        --   2. Archive (delete) this contract
+        --   3. Exercise consuming choices on this contract
+        -- The username creates their own profile — they are the sole signatory.
         signatory username
+
+        -- DAML CONCEPT: observer
+        -- Observers can READ the contract (see it in their active contract set)
+        -- but they did NOT authorize its creation and cannot exercise choices
+        -- unless they are also listed as a controller.
+        -- WHY: Everyone username follows can see their profile (e.g., to see their alias).
         observer following
 
-        key username : Party 
-        maintainer key 
+        -- DAML CONCEPT: Contract Key
+        -- A key uniquely identifies a contract of this type ON THE LEDGER.
+        -- username alone is the key — one SocialNetworkUser per Party.
+        -- Type annotation ': Party' is required.
+        key username : Party
 
+        -- DAML CONCEPT: maintainer
+        -- Must be a Party or list of Parties that is a SUBSET of signatories.
+        -- 'key' here refers to the key value itself (= username, which is a Party).
+        -- The maintainer ensures no two contracts share the same key.
+        maintainer key
+
+        -- DAML CONCEPT: ensure
+        -- A boolean precondition. Contract creation FAILS if this is False.
+        -- Throws PreconditionFailed exception if violated.
+        -- WHY: An alias must not be empty — empty alias violates business rules.
         ensure alias /= ""
+        -- NOTE: /= means "not equal to" (Haskell/Daml notation)

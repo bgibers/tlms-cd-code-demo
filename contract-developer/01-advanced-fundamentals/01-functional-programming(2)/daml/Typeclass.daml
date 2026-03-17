@@ -1,6 +1,32 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: Typeclass
+-- PURPOSE: Introduces Daml's built-in typeclasses via simple examples.
+--          Show and Eq are the most common typeclasses you'll encounter.
+-- LEARNING FOCUS: Typeclass usage (not definition), Show, Eq
+-- ============================================================
+-- DAML CONCEPT: Typeclass
+-- A typeclass is a "contract" that a type promises to fulfill.
+-- It says: "any type implementing this class can do these operations."
+--
+-- Built-in Daml typeclasses you'll use constantly:
+--
+-- | Typeclass | Methods            | What it means                        |
+-- |-----------|-------------------|--------------------------------------|
+-- | Show      | show : a -> Text  | Convert a value to Text for display  |
+-- | Eq        | (==) : a -> a -> Bool | Structural equality comparison   |
+-- |           | (/=) : a -> a -> Bool | Inequality                       |
+-- | Ord       | compare, (<), (>)  | Ordering (required for contract keys)|
+-- | Action    | (>>=), pure, ...   | Monadic sequencing (used in `do`)    |
+--
+-- WHY typeclasses matter for Daml:
+-- - `deriving (Show, Eq, Ord)` is needed on contract key types
+-- - `debug $ x` requires x to implement Show
+-- - `==` and `/=` require Eq
+-- - Template fields need Show, Eq (for most operations)
+-- ============================================================
 module Typeclass where
 
 import Daml.Script
@@ -8,6 +34,24 @@ import Daml.Script
 
 testTypeclass : Script ()
 testTypeclass = script do
+    -- DAML CONCEPT: show — converts any Show instance to Text
+    -- `show "hello"` → "\"hello\"" (adds quotes since input is already Text)
+    -- `show 42` → "42"
+    -- `show True` → "True"
+    -- The `$` operator is function application with low precedence:
+    --   `debug $ show "hello"` equals `debug (show "hello")`
     debug $ show "hello"  -- Text is an instance of Show typeclass
+
+    -- DAML CONCEPT: (==) — equality comparison, returns Bool
+    -- Text implements Eq so we can compare strings with ==.
+    -- `"hello" == "hello"` → True
+    -- `"hello" == "world"` → False
+    -- The Eq typeclass also gives us (/=) for inequality.
     debug $ "hello" == "hello"  -- Text is an instance of Eq typeclass
 
+-- NOTE: In your own types, add these typeclasses via:
+--   data MyType = MyType with field: Text
+--     deriving (Eq, Show)
+-- Then you automatically get `==`, `/=`, `show` for MyType.
+-- Without `deriving Eq`, you cannot use `==` on MyType values.
+-- Without `deriving Show`, you cannot use `debug $` on MyType values.

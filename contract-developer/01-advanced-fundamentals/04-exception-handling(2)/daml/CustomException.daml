@@ -1,6 +1,17 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: CustomException
+-- PURPOSE: Demonstrates defining custom exception types in Daml.
+-- LEARNING FOCUS: exception keyword, custom error messages
+-- ============================================================
+-- WHY custom exceptions:
+--   PreconditionFailed is a built-in, generic exception.
+--   Custom exceptions carry structured data (field names, details)
+--   and can be caught selectively in try-catch handlers.
+--   They give callers MEANINGFUL error context, not just "something failed."
+-- ============================================================
 module CustomException where
 
 import Daml.Script
@@ -16,8 +27,8 @@ template SocialNetworkUser
         signatory username
         observer following
 
-        key username : Party 
-        maintainer key 
+        key username : Party
+        maintainer key
 
         ensure alias /= ""
 
@@ -25,7 +36,7 @@ template SocialNetworkUser
             with
                 userToFollow: Party
             controller username
-            do       
+            do
                 assertMsg "You cannot follow yourself" (userToFollow /= username)
                 assertMsg "You cannot follow the same user twice" (notElem userToFollow following)
                 create this with following = userToFollow :: following
@@ -37,27 +48,41 @@ template SocialNetworkUser
             do
                 try do
                     archive self
-                    create this with alias = newAlias 
+                    create this with alias = newAlias
                 catch
                     (PreconditionFailed _) -> do
-                        -- pure self
                         trace "Alias cannot be an empty string. Try again." (pure self)
-                        
-                    -- (PreconditionFailed ea) -> do
-                    --     trace ea (return self)
-
-                    -- (e : PreconditionFailed) -> do
-                    --     trace (message e) (return self)
+                        -- Variants of how to access the exception:
+                        -- (PreconditionFailed ea) -> trace ea (return self)
+                        -- (e : PreconditionFailed) -> trace (message e) (return self)
 
 
--- Custom Exception
+-- ===== CUSTOM EXCEPTION: ChangeFailed =====
+-- DAML CONCEPT: exception definition
+-- The 'exception' keyword defines a new exception type.
+-- Like 'template', it has fields (with ... syntax).
+-- The 'where message "..."' clause defines what 'message e' returns when caught.
+--
+-- SYNTAX:
+--   exception <ExceptionName>
+--     with
+--       field1: Type1
+--       field2: Type2
+--     where
+--       message "static or computed message text"
+--
+-- WHY structured fields: callers can inspect fieldName and details to
+-- programmatically handle specific failure modes.
 exception ChangeFailed
     with
-        fieldName: Text
-        details: Text
+        fieldName: Text   -- which field caused the failure (e.g., "alias")
+        details: Text     -- human-readable description of the failure
     where
+        -- DAML CONCEPT: message clause
+        -- Defines what 'message e' returns when this exception is caught.
+        -- Must be a Text expression. Can reference exception fields.
+        -- Example with fields: message fieldName <> ": " <> details
         message "Provided input is invalid."
-
 
 
 test = script do
@@ -69,7 +94,8 @@ test = script do
             username = alice
             following = []
             alias = "aliceAlias"
-    
-    submit alice do 
-        exerciseCmd aliceCid ChangeAlias with newAlias = ""
 
+    -- This test just verifies the try-catch still works (uses PreconditionFailed handler)
+    -- The ChangeFailed exception is DEFINED here but not yet THROWN — see ThrowingException.daml
+    submit alice do
+        exerciseCmd aliceCid ChangeAlias with newAlias = ""

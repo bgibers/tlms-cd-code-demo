@@ -1,52 +1,117 @@
+-- ============================================================
+-- MODULE: UpgradePackage.UpgradeModule
+-- PURPOSE: Demonstrates contract MIGRATION — moving existing
+--          contracts from the old Position format to the new
+--          Currency-aware Position format.
+-- LEARNING FOCUS: Safe contract migration with mutual consent
+-- ============================================================
+-- UPGRADE STRATEGY: Propose-Migrate-Accept
+-- Problem: Old Position contracts (InitialState.Cash.Position) don't have
+--          a 'currency' field. New code uses Upgrade3.Currency.Position.
+-- Solution:
+--   1. Bank proposes an upgrade (bank signs)
+--   2. Counterparty accepts (both sign the Upgrader contract)
+--   3. Bank runs the migration (nonconsuming — can migrate many batches)
+--      For each old Position:
+--        - Fetch the old data
+--        - Archive the old contract
+--        - Create a new TransferProposal (requires both bank+owner to authorize)
+--        - Accept the proposal (owner re-authorizes the new contract)
+--
+-- WHY mutual consent: The owner must re-sign the new contract.
+-- This ensures the owner explicitly agrees to the new schema
+-- (including the currency = "USD" default being added).
+-- ============================================================
+-- DAML CONCEPT: {-# LANGUAGE ApplicativeDo #-}
+-- ApplicativeDo allows do-notation to use Applicative instead of Monad
+-- when possible — can enable more parallel execution in some contexts.
 {-# LANGUAGE ApplicativeDo #-}
 
-module UpgradePackage.UpgradeModule where 
+module UpgradePackage.UpgradeModule where
 
+-- DAML CONCEPT: qualified import with alias
+-- 'qualified as Old' means access as Old.Position, Old.TransferProposal etc.
+-- Needed to disambiguate from the NEW Position in Upgrade3.Currency.
 import InitialState.Cash qualified as Old
-import Upgrade3.Currency
+import Upgrade3.Currency   -- the new Position template
 
-import DA.Foldable (forA_)
+import DA.Foldable (forA_)  -- forA_ = for-each action, discarding results
 
+
+-- ===== TEMPLATE: UpgradeProposal =====
+-- Step 1: Bank proposes the upgrade to a specific counterparty.
+-- PATTERN: Propose-Accept to establish mutual agreement for upgrade.
 template UpgradeProposal
   with
     bank : Party
     counterparty : Party
   where
+    -- AUTH: Bank proposes (bank signs). Counterparty decides whether to accept.
     signatory bank
     observer counterparty
 
+    -- ===== CHOICE: AcceptUpgrade =====
+    -- Counterparty accepts — creates an Upgrader with both parties signing.
+    -- WHY: The Upgrader template requires BOTH bank and counterparty.
+    -- This is the mutual-consent mechanism for the upgrade.
     choice AcceptUpgrade : ContractId Upgrader
       controller counterparty
       do
-        create Upgrader with ..
+        create Upgrader with ..   -- '..' copies bank and counterparty fields
 
 
+-- ===== TEMPLATE: Upgrader =====
+-- Step 2: The bilateral upgrade executor.
+-- Both bank and counterparty have agreed — Upgrader represents that agreement.
 template Upgrader
   with
-      bank : Party
-      counterparty : Party
-    where
-      signatory bank, counterparty
+    bank : Party
+    counterparty : Party
+  where
+    -- AUTH: Both parties have signed (mutual consent for migration).
+    signatory bank, counterparty
 
-      nonconsuming choice RunUpgrade : ()
-        with
-          positionCids : [ContractId Old.Position]
-        controller bank
-        do
-            forA_ positionCids (\positionCid ->  do
+    -- ===== CHOICE: RunUpgrade =====
+    -- DAML CONCEPT: nonconsuming choice
+    -- nonconsuming: The Upgrader contract persists after RunUpgrade.
+    -- WHY: Migration might happen in multiple batches.
+    -- The bank can call RunUpgrade repeatedly with different batches.
+    nonconsuming choice RunUpgrade : ()
+      with
+        -- List of OLD Position contracts to migrate
+        positionCids : [ContractId Old.Position]
+      controller bank
+      do
+          -- DAML CONCEPT: forA_
+          -- forA_ list action — applies action to each element, discards results.
+          -- Like 'for each positionCid in positionCids do ...'
+          forA_ positionCids (\positionCid -> do
+            -- DAML CONCEPT: Destructuring fetch with pattern match
+            -- 'Old.Position {..}' brings all fields of the old Position into scope.
+            -- {..} = bring all fields as local names: issuer, owner, quantity, obs
             Old.Position {..} <- fetch positionCid
+
+            -- Archive the old contract — it's being replaced
             archive positionCid
-            let 
-                newPosition = Position with 
-                    currency = "USD"
-                    ..
+
+            -- DAML CONCEPT: Build the new Position (from Upgrade3.Currency)
+            -- 'currency = "USD"' is the new field being added.
+            -- All other fields (..) are copied from the old Position's destructuring.
+            let
+                newPosition = Position with
+                    currency = "USD"   -- the new required field, defaulted to "USD"
+                    ..                 -- issuer, owner, quantity, obs from old contract
+
+            -- PATTERN: Use TransferProposal round-trip to re-authorize ownership.
+            -- The new Position requires owner's signature.
+            -- Creating a TransferProposal (which owner can Accept) gets that signature.
+            -- The bank (signatory of Upgrader) provides the proposal authorization.
             newTransferProposalCid <- create TransferProposal with
               position = newPosition
-              newOwner = owner
-            
+              newOwner = owner   -- same owner as before (migration, not transfer)
+
+            -- Owner accepts their own transfer proposal — re-signs the new contract.
+            -- WHY self-accept: owner is both the proposer and recipient here.
+            -- This is how we ensure owner explicitly authorizes the new schema.
             exercise newTransferProposalCid Accept
             )
-
-          
-
-          

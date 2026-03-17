@@ -1,27 +1,79 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: InformativeTypes (04-exception-handling(1))
+-- PURPOSE: Demonstrates Either and Optional as informative return types
+--          for functions that can fail. These are alternatives to throwing
+--          exceptions — they encode failure in the TYPE ITSELF.
+-- LEARNING FOCUS: Either for error-or-success, Optional for presence/absence,
+--                 pattern matching on sum types, informative vs exceptional errors
+-- ============================================================
+-- DESIGN DECISION: When to use Optional/Either vs throw/try-catch?
+--
+-- | Approach     | Use when                                   |
+-- |--------------|-------------------------------------------|
+-- | Either Text  | Caller should handle both cases explicitly |
+-- | Optional     | Absence is expected and common             |
+-- | throw        | Error is exceptional, caller may not recover|
+-- | try-catch    | Caller must intercept and handle errors    |
+--
+-- Either and Optional make failures visible in the TYPE SIGNATURE.
+-- A function returning `Optional Int` TELLS the caller "this might not exist."
+-- A function returning `Int` that throws instead HIDES this possibility.
+-- ============================================================
 module InformativeTypes where
 
-import Daml.Script 
+import Daml.Script
 
 
+-- ===== EITHER: Error or Success =====
+-- DAML CONCEPT: Either Text Int
+-- Left = error case (conventionally: Left carries the error message)
+-- Right = success case (conventionally: Right carries the result)
+-- The caller MUST handle both cases via pattern matching.
+-- WHY "Either": the function returns EITHER a Text (error) OR an Int (success).
 someFunction: Int -> Either Text Int
 someFunction x =
    if (x < 0) then
-        Left "Error"
-   else Right (x + 2)
-
+        Left "Error"       -- negative input → error case
+   else Right (x + 2)     -- non-negative input → success case
 
 testSF = script do
-    debug $ someFunction (-2)
-    debug $ someFunction 2
+    -- DAML CONCEPT: debug prints the value with its constructor tag
+    -- Left "Error" → prints: Left "Error"
+    -- Right 4      → prints: Right 4
+    debug $ someFunction (-2)  -- Prints: Left "Error"
+    debug $ someFunction 2     -- Prints: Right 4
 
 
+-- ===== OPTIONAL: Presence or Absence =====
+-- DAML CONCEPT: Optional Int
+-- None = no value (absence)
+-- Some x = a value is present
+-- Pattern: `safeDiv _ 0 = None` — division by zero returns None instead of crashing.
+-- This is safer than throwing an exception because:
+--   1. The caller sees the possibility of failure in the signature
+--   2. No exception handling needed — just pattern match on None/Some
 safeDiv : Int -> Int -> Optional Int
-safeDiv _ 0 = None
-safeDiv x y = Some (x / y)
+safeDiv _ 0 = None           -- Wildcard `_` ignores the first arg when denominator is 0
+safeDiv x y = Some (x / y)  -- Normal division wraps result in Some
 
 testSD = script do
-    debug $ safeDiv 6 0 
-    debug $ safeDiv 6 2 
+    debug $ safeDiv 6 0   -- Prints: None
+    debug $ safeDiv 6 2   -- Prints: Some 3
+
+-- ===== PATTERN MATCHING REMINDER =====
+-- To USE these values, pattern match:
+--
+-- case someFunction x of
+--   Left err -> ... handle error ...
+--   Right val -> ... use val ...
+--
+-- case safeDiv x y of
+--   None -> ... division by zero ...
+--   Some result -> ... use result ...
+--
+-- In Daml scripts, query @T returns Optional Contract — you'll see this pattern:
+--   Some contract <- queryContractId alice cid  -- asserts it exists
+--   None <- queryContractId alice cid           -- asserts it does NOT exist

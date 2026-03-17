@@ -1,42 +1,71 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: SumVsProduct
+-- PURPOSE: Illustrates the difference between sum types and
+--          product types by counting possible values.
+-- LEARNING FOCUS: Type cardinality and data type design
+-- ============================================================
+-- KEY INSIGHT:
+--   Sum type     = A OR B  (cardinality = |A| + |B|)
+--   Product type = A AND B (cardinality = |A| × |B|)
+-- Choosing the right type prevents invalid states at compile time.
+-- ============================================================
 module SumVsProduct where
 
 
+-- ===== BASE TYPES =====
+
+-- DAML CONCEPT: Unit sum type (one constructor, one value)
+-- One has exactly 1 possible value: One
 data One = One
+-- Cardinality: 1
 
--- One
-
-
+-- DAML CONCEPT: Binary sum type (two constructors, two values)
+-- Two has exactly 2 possible values: Two_a or Two_b
 data Two
     = Two_a
     | Two_b
+-- Cardinality: 2
 
--- Two_a, Two_b
 
-
+-- ===== SUM TYPE =====
+-- DAML CONCEPT: Sum type (tagged union / variant)
+-- Sum_One_Two is EITHER an A_One (wrapping One) OR an A_Two (wrapping Two).
+-- Cardinality = |One| + |Two| = 1 + 2 = 3 possible values:
+--   A_One One
+--   A_Two Two_a
+--   A_Two Two_b
 data Sum_One_Two
     = A_One One
-    | A_Two Two    
-
+    | A_Two Two
+-- Possible values:
 -- A_One One, A_Two Two_a, A_Two Two_b
 
+-- WHY use sum types: model mutually exclusive alternatives
+-- Examples in contracts:
+--   data TransferResult = Accepted (ContractId Asset) | Rejected Text | Pending
+--   data Participant = Solo Party | Group [Party]   (like the Either in the capstone!)
 
 
-
-
-
+-- ===== PRODUCT TYPE =====
+-- DAML CONCEPT: Product type (record)
+-- Product_Two_Two has BOTH side1 AND side2 (a Two value each).
+-- Cardinality = |Two| × |Two| = 2 × 2 = 4 possible values
 data Product_Two_Two = Product_Two_Two
     with
         side1 : Two
-        side2 : Two  
-        
--- Product_Two_Two with side1 = Two_a; side2 = Two_a,
--- Product_Two_Two with side1 = Two_a; side2 = Two_b,
--- Product_Two_Two with side1 = Two_b; side2 = Two_a,
--- Product_Two_Two with side1 = Two_b; side2 = Two_b
+        side2 : Two
+-- Possible values:
+-- Product_Two_Two { side1 = Two_a; side2 = Two_a }
+-- Product_Two_Two { side1 = Two_a; side2 = Two_b }
+-- Product_Two_Two { side1 = Two_b; side2 = Two_a }
+-- Product_Two_Two { side1 = Two_b; side2 = Two_b }
 
+-- WHY use product types: model data that has MULTIPLE fields simultaneously
+-- Most Daml templates are product types (they have multiple fields)
 
-
-
+-- DESIGN RULE: "Make illegal states unrepresentable"
+-- Use SUM types to prevent combining values that shouldn't go together.
+-- Use PRODUCT types to group values that always exist together.

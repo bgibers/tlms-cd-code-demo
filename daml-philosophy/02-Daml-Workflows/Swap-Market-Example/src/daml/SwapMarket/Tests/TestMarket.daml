@@ -1,6 +1,28 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: SwapMarket.Tests.TestMarket
+-- PURPOSE: End-to-end integration test for the complete swap market workflow.
+--          Tests the full flow: join market → offer card → propose swap → accept swap.
+--          Also demonstrates sub-transaction privacy verification via IDE inspection.
+-- LEARNING FOCUS: submitMulti with disclosure parties, addRelTime, DA.Time,
+--                 multi-step workflow test, DefaultMarketSetup fixture,
+--                 sub-transaction privacy verification
+-- ============================================================
+-- CRITICAL PRIVACY NOTE (from original code comment):
+-- "If you examine the results of this test in the IDE you can confirm that
+-- Issuer A never learns of Card B and similarly, Issuer B never learns of Card A.
+-- This is despite both transfers occurring within a single transaction.
+-- This sub-transaction privacy is a critical capability when running multi-party workflows."
+--
+-- How to verify in Daml Studio:
+-- Run this test in the IDE and open the transaction tree.
+-- Look at the SwapProposal_Accept transaction.
+-- Issuer A: only sees Alice's card being archived and a new card for Bob created.
+-- Issuer B: only sees Bob's card being archived and a new card for Alice created.
+-- Neither issuer sees the OTHER issuer's sub-transaction.
+-- ============================================================
 module SwapMarket.Tests.TestMarket where
 
 import Daml.Script
@@ -14,36 +36,64 @@ import SwapMarket.Tests.TestCardIssuance
 -- | If you examine the results of this test in the IDE you can confirm that Issuer A never learns of Card B and
 --   similarly, Issuer B never learns of Card A. This is despite both transfers occuring within a single transaction.
 --   This sub-transaction privacy is a critical capability when running multi-party workflows.
+-- ===== TEST: Full happy-path swap workflow =====
 testSwap : Script ()
 testSwap = do
   DefaultMarketSetup with .. <- runDefaultMarketSetup
   let DefaultCardSetup with .. = cardSetup
 
-  -- Alice creates a card offer.
+  -- ===== STEP 1: Alice offers her card on the market =====
   now <- getTime
+  -- DAML CONCEPT: addRelTime
+  -- `addRelTime time delta` adds a RelTime to an absolute Time.
+  -- `days 1` creates a RelTime of 1 day.
+  -- Alice's offer expires in 1 day; proposals must be at least 15 minutes long.
   aliceOfferId <- submit alice $ exerciseCmd aliceInstallId MarketAppInstall_OfferCard with
     offeredCardDetails = aliceCard.cardDetails
     expiresAt = addRelTime now (days 1)
     minProposalDuration = minutes 15
-  
-  -- Bob learns via market operator of the offer, and makes a proposal.
-  -- We use submitMulti to simulate the submission via explicit disclosure using a direct read from the provider.
+
+  -- ===== STEP 2: Bob proposes a swap =====
+  -- DAML CONCEPT: submitMulti [bob] [provider] — Explicit Disclosure
+  -- `submitMulti signatories disclosedContracts`
+  -- The second list is "explicitly disclosed contracts" — contracts from other parties
+  -- that the submitter needs to read.
+  -- Here: bob is the submitter, but he needs to see aliceOfferId (the CardOffer).
+  -- `[provider]` means: "use contracts visible to provider for this submission"
+  -- WHY: The market provider is the "reader" of offers. Bob submits via provider's
+  -- view of the offer. This simulates how a real market UI would work:
+  -- Bob sees Alice's offer through the market interface (provider's dashboard).
   proposalId <- submitMulti [bob] [provider] $ exerciseCmd aliceOfferId CardOffer_ProposeSwap with
     proposer = bob
     proposerMarketId = bobInstallId
     proposedCardId = bobCardId
-    proposalExpiresAt = addRelTime now (hours 1)
+    proposalExpiresAt = addRelTime now (hours 1)  -- Proposal expires in 1 hour
 
 
+  -- ===== STEP 3: Time passes (simulating real-world delay) =====
+  -- DAML CONCEPT: passTime
+  -- Advances ledger time. After this, 30 minutes have passed.
+  -- The SwapProposal has NOT expired (expires in 1 hour).
   -- Half an hour passes until alice is ready to accept the proposal.
   passTime (minutes 30)
+
+  -- ===== STEP 4: Alice accepts the swap =====
+  -- This is the ATOMIC SETTLEMENT step.
+  -- Inside SwapProposal_Accept:
+  --   1. Validates proposal not expired, Alice owns aliceCardId, details match
+  --   2. Transfers Alice's card to Bob
+  --   3. Unlocks Bob's locked card
+  --   4. Transfers Bob's (unlocked) card to Alice
+  -- All 4 steps happen in ONE transaction — if any fails, all roll back.
   swapResult <- submit alice $ exerciseCmd proposalId SwapProposal_Accept with
     offeredCardId = aliceCardId
 
-  -- Alice and Bob each have the other ones card
+  -- ===== ASSERTIONS: Verify post-swap state =====
+  -- Alice now has Bob's card (Pikachu Illustrator from Issuer B)
   aliceCards <- query @Card alice
   map (._2.cardDetails) aliceCards === [bobCard.cardDetails]
 
+  -- Bob now has Alice's card (Alpha Black Lotus from Issuer A)
   bobCards <- query @Card bob
   map (._2.cardDetails) bobCards === [aliceCard.cardDetails]
   pure ()
@@ -52,15 +102,19 @@ testSwap = do
 -- We would also test other alternatives to the happy path (such as Cancel and Withdraw or Expire).
 
 
--- utitlies
------------
+-- ===== UTILITIES =====
 
+-- ===== DATA TYPE: DefaultMarketSetup =====
+-- Bundles the complete market setup: cards + provider + install contracts.
+-- Test functions destructure what they need from this record.
 data DefaultMarketSetup = DefaultMarketSetup with
-    cardSetup : DefaultCardSetup
-    provider : Party
-    aliceInstallId : ContractId MarketAppInstall
-    bobInstallId : ContractId MarketAppInstall
-    
+    cardSetup : DefaultCardSetup             -- Card state (alice, bob, their cards)
+    provider : Party                         -- Market operator
+    aliceInstallId : ContractId MarketAppInstall  -- Alice's market membership
+    bobInstallId : ContractId MarketAppInstall    -- Bob's market membership
+
+-- ===== SETUP: Initialize full market state =====
+-- Builds on runDefaultCardSetup: cards already issued, then both join the market.
 runDefaultMarketSetup : Script DefaultMarketSetup
 runDefaultMarketSetup = do
   cardSetup@DefaultCardSetup with .. <- runDefaultCardSetup
@@ -69,8 +123,12 @@ runDefaultMarketSetup = do
   bobInstallId <- joinMarket provider bob
   pure DefaultMarketSetup with ..
 
+-- ===== UTILITY: joinMarket =====
+-- DAML CONCEPT: Propose-Accept for market membership
+-- User creates MarketAppInstallRequest (user signs).
+-- Provider accepts → creates MarketAppInstall (both user + provider sign).
+-- This is the Propose-Accept pattern for two-party agreements.
 joinMarket : Party -> Party -> Script (ContractId MarketAppInstall)
 joinMarket provider user = do
   requestId <- submit user $ createCmd MarketAppInstallRequest with provider; user
   submit provider $ exerciseCmd requestId MarketAppInstallRequest_Accept
- 

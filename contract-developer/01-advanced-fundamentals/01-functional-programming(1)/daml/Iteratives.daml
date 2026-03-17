@@ -1,48 +1,80 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: Iteratives
+-- PURPOSE: Demonstrates iteration in Daml via recursion,
+--          map (transform), and foldl (reduce/accumulate).
+-- LEARNING FOCUS: How to "loop" in a pure functional language
+-- ============================================================
+-- NOTE: Daml has NO for/while loops (it's a pure functional language).
+--       Instead, use: recursion, map, foldl, forA, mapA, replicateA
+-- ============================================================
 module Iteratives where
 
-import Daml.Script 
+import Daml.Script
 
 
--- Recursion
+-- ===== RECURSION =====
+-- DAML CONCEPT: Recursion
+-- Since there are no loops, repetition is expressed via recursive function calls.
+-- IMPORTANT: In Daml, recursion can ONLY happen at the top level (module-level functions).
+-- You CANNOT write locally-defined recursive helpers inside a 'where' clause.
+-- WHY: The Daml compiler needs to prove termination for contract execution safety.
 factorial: Int -> Int
-factorial n = 
-   if (n < 2) then 1 
-   else n * factorial (n - 1)
+factorial n =
+   if (n < 2) then 1       -- base case: factorial(0) = factorial(1) = 1
+   else n * factorial (n - 1)  -- recursive case: n! = n * (n-1)!
 
 testFac = script do
-   debug $ factorial 5 -- 120
+   debug $ factorial 5   -- Output: 120 (5 * 4 * 3 * 2 * 1)
 
 
--- "... recursion can only happen at the top level."
+-- NOTE: This would FAIL to compile — local recursion is not allowed:
 -- subFactorial : Int -> Int
 -- subFactorial n =
 --    factorial' 1 n
 --    where
---    factorial' acc n' =
---       if n == 1
---       then acc
---       else factorial' (acc * n') $ n' - 1
+--    factorial' acc n' =    -- ERROR: local recursive function not allowed
+--       if n == 1 then acc else factorial' (acc * n') $ n' - 1
 
 
-
--- Map
+-- ===== MAP =====
+-- DAML CONCEPT: map (higher-order function)
 -- map : (a -> b) -> [a] -> [b]
--- cf. fmap(<$>): generic version of map
+-- Applies a function to EVERY element of a list, producing a new list.
+-- The original list is NOT modified (immutability).
+-- WHY: Transform lists without mutation. Common in contract logic.
+--
+-- cf. fmap (<$>) : the more general version that works on any Functor (not just lists)
 moduloUsingMap: [Int] -> Int -> [Int]
-moduloUsingMap x y = map (% y) x
+moduloUsingMap x y = map (% y) x   -- (% y) is a "section" — partial application of %
 
 testMap = script do
-   debug $ moduloUsingMap [14, 15, 19, 20] 3  --[2,0,1,2]
+   -- Apply (% 3) to each element: 14%3=2, 15%3=0, 19%3=1, 20%3=2
+   debug $ moduloUsingMap [14, 15, 19, 20] 3   -- Output: [2,0,1,2]
 
 
--- Fold
+-- ===== FOLDL =====
+-- DAML CONCEPT: foldl (left fold / reduce)
 -- foldl : (b -> a -> b) -> b -> [a] -> b
--- cf. foldr: right associative version of foldl
+-- Reduces a list to a single value using an accumulator.
+-- Arguments:
+--   (b -> a -> b) = combining function (accumulator, element) -> new accumulator
+--   b             = initial accumulator value
+--   [a]           = input list
+-- WHY: Sum lists, count items, build maps, accumulate state.
+--
+-- cf. foldr: right-associative version (processes list from right to left)
+--           generally safer for lazy evaluation but not needed in strict Daml
 sumList: [Int] -> Int
 sumList x = foldl (+) 0 x
+-- Trace: foldl (+) 0 [1,2,3,4]
+--      = foldl (+) (0+1) [2,3,4]
+--      = foldl (+) (1+2) [3,4]
+--      = foldl (+) (3+3) [4]
+--      = foldl (+) (6+4) []
+--      = 10
 
 testFolds = script do
-   debug $ sumList [1..4]   -- 10
+   debug $ sumList [1..4]   -- Output: 10  ([1..4] = [1,2,3,4])

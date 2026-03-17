@@ -1,75 +1,78 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: Conditionals
+-- PURPOSE: Demonstrates the three ways to branch in Daml:
+--          if-then-else, guards, and case-of
+-- LEARNING FOCUS: Control flow in pure functions
+-- ============================================================
+-- NOTE: Daml has NO loops or mutation. All branching produces values.
+--       Every branch must return the same type.
+-- ============================================================
 module Conditionals where
 
-import Daml.Script 
+import Daml.Script
 
--- if-then-else
+-- ===== IF-THEN-ELSE =====
+-- DAML CONCEPT: if-then-else expression
+-- Unlike most languages, if-then-else in Daml is an EXPRESSION (returns a value).
+-- Both branches must return the same type (here: Text).
+-- Equivalent to the ternary operator ?: in other languages.
 oddOrEven: Int -> Text
 oddOrEven x =
+   -- % is the modulo operator
    if (x % 2 == 0) then "even"
    else "odd"
 
 testOdd = script do
-   debug $ oddOrEven 3
+   debug $ oddOrEven 3   -- Output: "odd"
 
 
-
--- Guards
+-- ===== GUARDS =====
+-- DAML CONCEPT: Guards (Haskell-style pattern matching on conditions)
+-- Guards use the | syntax and are checked top-to-bottom.
+-- Each guard is a Boolean condition; the first True one wins.
+-- 'otherwise' = True (catch-all, like 'default' in switch).
+-- PATTERN: Use guards when you have more than 2 branches.
 classifyNumber: Int -> Text
-classifyNumber n 
+classifyNumber n
    | n > 0 && n % 2 == 0 = "positive and even"
-   | n > 0 && n % 2 /= 0 = "positive and odd"
+   | n > 0 && n % 2 /= 0 = "positive and odd"   -- /= is "not equal"
    | n < 0 && n % 2 == 0 = "negative and even"
    | n < 0 && n % 2 /= 0 = "negative and odd"
    | otherwise = "zero"
 
-testCN = script do 
-   debug $ classifyNumber (-23)
+testCN = script do
+   debug $ classifyNumber (-23)   -- Output: "negative and odd"
 
+-- DAML CONCEPT: where clause
+-- 'where' binds local helper names used in the guards above.
+-- Avoids repeating 'n % 2 == 0' in every guard.
+-- NOTE: 'where' bindings are lazily evaluated — only computed if the branch is taken.
 boundClassifyNumber: Int -> Text
-boundClassifyNumber n 
-   | n > 0 && even = "positive and even"
+boundClassifyNumber n
+   | n > 0 && even     = "positive and even"
    | n > 0 && not even = "positive and odd"
-   | n < 0 && even = "negative and even"
+   | n < 0 && even     = "negative and even"
    | n < 0 && not even = "negative and odd"
-   | otherwise = "zero"
-   where even = n % 2 == 0
+   | otherwise         = "zero"
+   where even = n % 2 == 0   -- local binding, available throughout all guards
 
 testBCN = script do
-   debug $ boundClassifyNumber 23
+   debug $ boundClassifyNumber 23   -- Output: "positive and odd"
 
--- case-of (pattern matching)
+-- ===== CASE-OF =====
+-- DAML CONCEPT: case-of (pattern matching)
+-- 'case expr of' evaluates 'expr' then matches against patterns.
+-- _ is a wildcard that matches anything (like default/else).
+-- PATTERN: Use case-of when matching on constructors (True/False, Some/None, Left/Right).
+-- NOTE: Pattern matching is exhaustive — the compiler warns if you miss a case.
 isEven : Int -> Text
 isEven x = case (x % 2) of
    0 -> "even"
-   _ -> "not even" 
+   _ -> "not even"    -- _ catches any value other than 0
 
 testEven = script do
-   debug $ isEven 2
-   debug $ isEven 3
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+   debug $ isEven 2   -- Output: "even"
+   debug $ isEven 3   -- Output: "not even"

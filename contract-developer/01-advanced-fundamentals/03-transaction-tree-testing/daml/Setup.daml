@@ -1,29 +1,66 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: Setup (03-transaction-tree-testing)
+-- PURPOSE: Defines the SocialNetworkUser template used across
+--          test modules in this section. Separating template
+--          definitions from test scripts enables MODULAR TESTING.
+-- LEARNING FOCUS: Template reuse across modules, contract key with Party,
+--                 notElem, :: cons operator, ensure clause
+-- ============================================================
+-- WHY a separate Setup module?
+-- The template definition lives here; test scripts import it.
+-- This mirrors real-world practice: production code and test scripts
+-- are separate files, not mixed together.
+-- ============================================================
 module Setup where
 
 
+-- ===== TEMPLATE: SocialNetworkUser =====
+-- DAML CONCEPT: Social graph on the ledger
+-- Models a user in a social network. The user can "follow" other parties.
+-- The `following` list tracks who this user follows.
+-- Observers = followers: they can see this contract (know the user exists).
 template SocialNetworkUser
     with
-        username: Party
-        following: [Party]
-        alias: Text
+        username: Party     -- The ledger identity of this user
+        following: [Party]  -- List of parties this user follows
+        alias: Text         -- Display name (human-readable, must not be empty)
     where
-        signatory username
-        observer following
+        signatory username  -- Only the user themselves can create/archive their profile
+        observer following  -- Everyone they follow can see their profile
 
-        key username : Party 
-        maintainer key 
+        -- DAML CONCEPT: Contract Key = Party
+        -- The simplest possible key: the party itself.
+        -- Guarantees: each Party can have at most ONE SocialNetworkUser contract.
+        -- WHY: No duplicate profiles — every username maps to exactly one profile.
+        key username : Party
+        maintainer key   -- username (the key itself) must be a signatory
 
+        -- DAML CONCEPT: ensure clause
+        -- `alias /= ""` means "alias must not be the empty string"
+        -- This fires at contract CREATION and in consuming choices that create new contracts.
+        -- If violated, throws PreconditionFailed.
         ensure alias /= ""
 
+        -- DAML CONCEPT: Consuming choice that re-creates
+        -- Follow archives the current contract and creates a new one with an updated list.
+        -- This is the "replace" pattern: contracts are immutable, so you archive and recreate.
         choice Follow: ContractId SocialNetworkUser
             with
                 userToFollow: Party
-            controller username
-            do       
+            controller username   -- Only the user themselves can choose who to follow
+            do
+                -- DAML CONCEPT: assertMsg
+                -- Throws GeneralError with the given message if the condition is False.
+                -- First assertion: can't follow yourself (would create a circular observer)
                 assertMsg "You cannot follow yourself" (userToFollow /= username)
+                -- DAML CONCEPT: notElem
+                -- `notElem x xs` is True if x is NOT in the list xs.
+                -- Guards against following the same person twice.
                 assertMsg "You cannot follow the same user twice" (notElem userToFollow following)
+                -- DAML CONCEPT: `::` cons operator — prepends an element to a list
+                -- `userToFollow :: following` → [userToFollow, ...previousFollowing]
+                -- `this with following = ...` → creates an updated contract with new following list
                 create this with following = userToFollow :: following
-                

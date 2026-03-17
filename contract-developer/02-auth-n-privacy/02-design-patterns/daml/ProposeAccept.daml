@@ -1,64 +1,124 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: ProposeAccept
+-- PURPOSE: Demonstrates the Propose-Accept pattern — the most
+--          fundamental multi-party workflow pattern in Daml.
+-- LEARNING FOCUS: How to implement mutual agreement without
+--                 requiring simultaneous action from both parties.
+-- ============================================================
+-- PATTERN: Propose-Accept
+-- PROBLEM: Creating a contract requires ALL signatories to authorize simultaneously.
+--          But in real workflows, parties act asynchronously.
+-- SOLUTION:
+--   1. Party A creates a PROPOSAL contract (only A signs)
+--   2. Party B ACCEPTS, REJECTS, or the proposal is CANCELLED
+--   3. On Accept: a new contract is created with both signatories
+-- WHY this works:
+--   - Proposal creation: only proposer signs
+--   - Accept choice: recipient is the controller → recipient authorizes at Accept time
+--   - When Iou is created inside Accept, both signatories (issuer, owner) are
+--     satisfied: issuer authorized the Proposal, recipient authorized the Accept.
+-- ============================================================
 module ProposeAccept where
 
-import Daml.Script 
+import Daml.Script
 
+-- ===== TEMPLATE: Iou =====
+-- A mutual IOU: BOTH issuer and owner must be signatories.
+-- This means neither can create it alone (prevents unilateral imposition).
 template Iou
   with
     issuer: Party
     owner: Party
   where
+    -- AUTH: Both issuer AND owner must authorize.
+    -- This makes Iou a "mutual agreement" contract.
     signatory issuer, owner
 
+    -- ===== CHOICE: Transfer =====
+    -- Owner initiates a transfer by creating a TransferProposal.
+    -- Only the owner can propose — they're the one giving up their IOU.
     choice Transfer: ContractId TransferProposal
       with
-        recipient: Party
+        recipient: Party   -- who will receive the IOU
       controller owner
       do
-        create TransferProposal with 
+        -- Creates a TransferProposal that recipient must Accept/Reject.
+        -- The 'iou = this' embeds the current IOU data into the proposal.
+        create TransferProposal with
           recipient
           iou = this
 
 
+-- ===== TEMPLATE: TransferProposal =====
+-- A pending IOU transfer waiting for the recipient's response.
+-- PRIVACY: recipient is an observer — they can see the proposal to decide.
 template TransferProposal
   with
     recipient: Party
-    iou: Iou
+    iou: Iou       -- the IOU data (not a ContractId — the full record is embedded)
   where
-    signatory iou.issuer, iou.owner 
-    observer recipient 
-    
-    choice Accept: ContractId Iou 
+    -- AUTH: Proposal is authorized by the IOU's current signatories.
+    -- signatory (signatory iou) = take the signatories of the iou record = [issuer, owner]
+    signatory iou.issuer, iou.owner
+
+    -- PRIVACY: Recipient can see the proposal (needs to to accept/reject).
+    observer recipient
+
+    -- ===== CHOICE: Accept =====
+    -- Recipient accepts the transfer.
+    -- AUTH: recipient is the controller → recipient's authorization is provided here.
+    -- Combined with iou.issuer and iou.owner being signatories of TransferProposal,
+    -- all three authorizations are available → creates new Iou(issuer, recipient).
+    choice Accept: ContractId Iou
       controller recipient
       do
+        -- Creates a new Iou with the recipient as the new owner.
+        -- Old Iou contract (if any) was already archived when Transfer was exercised.
+        -- TransferProposal is archived (consuming choice).
         create iou with
-          owner = recipient 
+          owner = recipient
 
+    -- ===== CHOICE: Reject =====
+    -- Recipient rejects — IOU returns to original owner.
+    -- WHY: Owner should get their IOU back if recipient says no.
     choice Reject: ContractId Iou
       controller recipient
       do
-        create iou 
+        create iou   -- recreate with original owner (iou.owner unchanged)
 
+    -- ===== CHOICE: Cancel =====
+    -- Owner cancels the proposal before recipient acts.
+    -- WHY: Owner might change their mind, or offer expired.
     choice Cancel: ContractId Iou
       controller iou.owner
       do
-        create iou
+        create iou   -- recreate with original owner
 
 
+-- ===== SCRIPT: test =====
 test = script do
-  alice <- allocateParty "Alice" 
+  alice <- allocateParty "Alice"
   bob <- allocateParty "Bob"
 
+  -- Bob creates an IOU with himself as both issuer and owner.
+  -- Bob is both signatories — he can create it alone.
   bobIou <- submit bob do
     createCmd Iou with
       issuer = bob
       owner = bob
 
+  -- Bob proposes to transfer his IOU to Alice.
+  -- Controller: bob (the owner). Creates a TransferProposal.
   bobPropose <- submit bob do
     exerciseCmd bobIou Transfer with
       recipient = alice
 
+  -- Alice accepts the transfer.
+  -- Controller: alice (the recipient). Creates new Iou(issuer=bob, owner=alice).
+  -- WHY this is valid: both bob (signatory of proposal) and alice (controller of Accept)
+  -- have authorized the new Iou's creation.
   submit alice do
     exerciseCmd bobPropose Accept

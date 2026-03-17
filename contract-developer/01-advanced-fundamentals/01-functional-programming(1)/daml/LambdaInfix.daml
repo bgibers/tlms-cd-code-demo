@@ -1,21 +1,48 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: LambdaInfix
+-- PURPOSE: Demonstrates lambda (anonymous) functions and
+--          infix notation for binary functions.
+-- LEARNING FOCUS: Functional syntax shortcuts
+-- ============================================================
 module LambdaInfix where
 
 import Daml.Script
 
 
+-- ===== LAMBDA FUNCTIONS =====
+-- DAML CONCEPT: Lambda (anonymous function)
+-- Syntax: \arg1 arg2 -> body
+-- The backslash \ is like the λ (lambda) symbol in math.
+-- WHY: Write short functions inline without naming them.
+-- Common use: passed to map, foldl, forA, etc.
+--
+-- Examples:
+--   \n -> n + 1         increments a number
+--   \x y -> x + y       adds two numbers
+--   \acc -> acc._2.title maps contract to its title field
 test_lambda = script do
-    debug $ (\n -> n + 1) 5
+    -- (\n -> n + 1) is an anonymous function applied to 5
+    debug $ (\n -> n + 1) 5   -- Output: 6
 
 
+-- ===== INFIX NOTATION =====
+-- DAML CONCEPT: Infix notation with backticks
+-- Any binary function f can be written between its arguments using backticks:
+--   f a b  ≡  a `f` b
+-- WHY: Makes some expressions read more naturally (especially domain-specific operations)
 addTwoNums: Int -> Int -> Int
 addTwoNums a b = a + b
 
 infixAdd: Int -> Int -> Int
-infixAdd x y = x `addTwoNums` y
--- infixAdd x y = addTwoNums x y
+infixAdd x y = x `addTwoNums` y   -- same as: addTwoNums x y
+-- infixAdd x y = addTwoNums x y   -- equivalent form
 
+-- DAML CONCEPT: Operator as function (prefix)
+-- Operators like (+) can be used as regular functions by wrapping in parentheses.
+-- (+) is the same as \a b -> a + b
 addTest = script do
-   debug $ (+) 2 3
+   -- (+) 2 3 is the same as 2 + 3 = 5
+   debug $ (+) 2 3   -- Output: 5

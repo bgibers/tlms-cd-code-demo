@@ -1,22 +1,57 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: VariantTypes
+-- PURPOSE: Demonstrates sum types (variant types) in Daml —
+--          types that can hold ONE of several possible shapes.
+--          Also shows generic (parameterized) constructors.
+-- LEARNING FOCUS: Sum types, data constructors with arguments,
+--                 type parameters in constructors, OR semantics
+-- ============================================================
+-- DAML CONCEPT: Sum type (variant / tagged union)
+-- A sum type has multiple CONSTRUCTORS, each potentially holding different data.
+-- A value of the type is EXACTLY ONE of those constructors.
+-- This is "OR" semantics: a MySumType is Constructor1 OR Constructor2 (not both).
+--
+-- Contrast with PRODUCT types (records):
+--   Product type: holds field1 AND field2 AND field3 (all simultaneously)
+--   Sum type:     holds Constructor1(data) OR Constructor2(data) (one at a time)
+--
+-- Diagram from the bottom of this file:
+--   Variants (Sum Types)                Records (Product Types)
+--        |                                   |
+--   +----+----+                         +----+----+
+--   |         |                         |         |
+-- Variant1  Variant2                  Field1    Field2
+--                                    (both exist simultaneously)
+-- ============================================================
 module VariantTypes where
 
 import Daml.Script
 
+-- ===== GENERIC CONSTRUCTOR =====
+-- DAML CONCEPT: Type parameter in a constructor
+-- `Floor a` is a type with one type parameter `a`.
+-- `Floor Int` holds an Int, `Floor Text` holds Text.
+-- This is like a "box" that can hold any type.
+-- The single constructor `Floor` takes one argument of type `a`.
 data Floor a = Floor a
     deriving (Eq, Show)
 
 testFL = script do
-    let 
-        fl : Floor Int 
-        fl = Floor 0 
+    let
+        fl : Floor Int   -- type annotation: this Floor holds an Int
+        fl = Floor 0     -- construct with value 0
 
-    debug $ fl
+    debug $ fl  -- Prints: Floor 0
 
-
-
+-- ===== SUM TYPE WITH MULTIPLE CONSTRUCTORS =====
+-- DAML CONCEPT: Sum type (variant)
+-- `MySumType` can be EITHER:
+--   - `MySumConstructor1` holding an `Int`, OR
+--   - `MySumConstructor2` holding a `(Text, Bool)` tuple
+-- Once constructed, you pattern match to determine which constructor it is.
 data MySumType = MySumConstructor1 Int
                 | MySumConstructor2 (Text, Bool)
                     deriving (Eq, Show)
@@ -24,68 +59,22 @@ data MySumType = MySumConstructor1 Int
 
 testMST = script do
     let
-        mySum1 = MySumConstructor1 17
-        mySum2 = MySumConstructor2 ("it's a sum", True)
+        mySum1 = MySumConstructor1 17              -- holds an Int
+        mySum2 = MySumConstructor2 ("it's a sum", True)  -- holds a (Text, Bool)
 
-    debug $ mySum1
-    debug $ mySum2
+    debug $ mySum1  -- Prints: MySumConstructor1 17
+    debug $ mySum2  -- Prints: MySumConstructor2 ("it's a sum",True)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+-- ===== WHEN TO USE SUM TYPES =====
+-- Use sum types when a value can be one of several distinct cases:
+--   data PaymentMethod = Cash | CreditCard Text | BankTransfer Party Decimal
+--   data Status = Pending | Approved | Rejected Text
+--   data Result a = Success a | Failure Text
+--
+-- Built-in sum types you use constantly:
+--   Optional a = None | Some a     (absence or presence of a value)
+--   Either a b = Left a | Right b  (typically error or success)
+--   Bool       = False | True      (the simplest sum type!)
 
 {-
         Variants (Sum Types)

@@ -1,30 +1,67 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: Test_AccountBalance
+-- PURPOSE: End-to-end test for the AccountBalance module.
+--          Shows the full lifecycle: bank issues assets, transfers to
+--          users, users transfer to each other — using the AccountBalance
+--          model with contract keys.
+-- LEARNING FOCUS: queryContractKey, chained transfers, partial transfers,
+--                 UTXO lifecycle with AccountBalance
+-- ============================================================
+-- WORKFLOW IN THIS TEST:
+--   1. US Bank creates an Asset of 1000.0
+--   2. US Bank transfers 400.0 to Alice (partial transfer)
+--   3. Alice accepts → has 400.0, Bank has 600.0 (remaining)
+--   4. US Bank transfers 100.0 to Bob
+--   5. Bob accepts → has 100.0
+--   6. Alice transfers 30.0 to Bob
+--   7. Bob accepts → has 130.0 total
+--   Returns: (alice, bob, ub, bobAssetCid)
+--   Used by: Test_Divulgence (to demonstrate divulgence of Bob's asset)
+-- ============================================================
 module Test_AccountBalance where
 
 import Setup
 import AccountBalance
-import Daml.Script 
+import Daml.Script
 
 testAccountBalance = script do
     (testParties@TestParties{..}) <- setupTestParties
 
+    -- ===== STEP 1: US Bank issues an asset =====
     ubAssetCid <- submit ub do
-      createCmd Asset with 
+      createCmd Asset with
         issuer = ub
         owner = ub
         amount = 1000.0
 
+    -- ===== STEP 2: US Bank transfers 400.0 to Alice =====
+    -- DAML CONCEPT: Asset_Transfer with transferAmount
+    -- In AccountBalance, Asset_Transfer takes a `transferAmount` (partial transfer).
+    -- This creates an AssetTransferProposal. The bank keeps the remainder.
     ubToAliceCid <- submit ub do
       exerciseCmd ubAssetCid Asset_Transfer with
         recipient = alice
         transferAmount = 400.0
 
+    -- ===== STEP 3: Alice accepts the transfer =====
     aliceAssetCid <- submit alice do
       exerciseCmd ubToAliceCid AssetTransferProposal_Accept
 
+    -- ===== STEP 4: Bank fetches its remaining asset using queryContractKey =====
+    -- DAML CONCEPT: queryContractKey @T party key
+    -- Returns Some (ContractId T, T) if the party can see a contract with that key.
+    -- Returns None if the contract doesn't exist OR is not visible to the party.
+    -- AccountBalance uses key (issuer, owner) : (Party, Party)
+    -- So (ub, ub) is the bank's own asset (issuer=ub, owner=ub).
+    -- After the partial transfer, the bank's asset has a new ContractId
+    -- (the old one was archived, a new one created with reduced amount).
+    -- queryContractKey is how we find it without tracking ContractIds.
     Some (ubRemainingAssetCid, _) <- queryContractKey @Asset ub (ub, ub)
+
+    -- ===== STEP 5: Bank transfers 100.0 to Bob =====
     ubToBobCid <- submit ub do
       exerciseCmd ubRemainingAssetCid Asset_Transfer with
         recipient = bob
@@ -33,12 +70,17 @@ testAccountBalance = script do
     submit bob do
       exerciseCmd ubToBobCid AssetTransferProposal_Accept
 
+    -- ===== STEP 6-7: Alice transfers 30.0 to Bob =====
+    -- Alice's 400.0 asset will be split: 30.0 to Bob, 370.0 remainder stays with Alice
     aliceToBobCid <- submit alice do
       exerciseCmd aliceAssetCid Asset_Transfer with
         recipient = bob
         transferAmount = 30.0
-    
+
     bobAssetCid <- submit bob do
       exerciseCmd aliceToBobCid AssetTransferProposal_Accept
 
+    -- Return state for use in Test_Divulgence
+    -- bobAssetCid: the contract that Alice_transferred 30.0 to Bob
+    -- NOTE: alice cannot see bobAssetCid because alice is NOT a signatory/observer on Bob's asset
     pure (alice, bob, ub, bobAssetCid)

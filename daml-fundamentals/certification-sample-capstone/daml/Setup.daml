@@ -1,15 +1,36 @@
+-- ============================================================
+-- MODULE: Setup
+-- PURPOSE: Script setup functions for the DamlForge capstone tests.
+--          Demonstrates complex script composition and test fixture patterns.
+-- LEARNING FOCUS: Script composition, test fixture records, user management
+-- ============================================================
+-- PATTERN: Layered setup
+--   setupTestParties  → allocates Party values
+--   setupProjectInfos → builds ProjectInfo records
+--   setupAccomplishments → runs full workflow to create Accomplishment contracts
+-- Each layer calls the previous, building up state incrementally.
+-- ============================================================
 module Setup where
 
 import Main
 import DA.Date
 import Daml.Script
 
+-- ===== TEST FIXTURE: TestParties =====
+-- DAML CONCEPT: Test fixture record
+-- Bundles all parties together so test functions don't need to re-allocate.
+-- Passed around between setup functions and test functions.
 data TestParties = TestParties with
     evaluator: Party
     proposer: Party
 
+-- ===== SETUP: setupTestParties =====
+-- DAML CONCEPT: allocatePartyWithHint
+-- allocateParty "Name": creates a party with display name "Name"
+-- allocatePartyWithHint "Name" (PartyIdHint "ID"): creates a party with
+--   display name "Name" AND a hint for the participant node to use "ID" as
+--   the party identifier (makes IDs more readable in logs/traces).
 setupTestParties = script do
-    -- 1. Allocate parties with the given display name
     evaluator <- allocatePartyWithHint "Evaluator" (PartyIdHint "EVL")
     proposer <- allocatePartyWithHint "Proposer" (PartyIdHint "PSR")
 
@@ -17,43 +38,64 @@ setupTestParties = script do
         evaluator
         proposer
 
+-- ===== SETUP: setupUsers =====
+-- DAML CONCEPT: User management in scripts
+-- In Daml, "parties" are ledger entities; "users" are application-level identities.
+-- A user can have multiple party rights (CanActAs, CanReadAs).
+-- CanActAs: the user can submit transactions as this party.
+-- WHY users: real applications authenticate users, not bare parties.
 setupUsers = script do
     (testParties@TestParties{..}, testProjectInfos@TestProjectInfos{..}) <- setupProjectInfos
 
-    -- 2. Construct user-ids from text
-    evalId <- validateUserId "Eval"   
+    -- DAML CONCEPT: validateUserId
+    -- Creates a UserId from a Text string (validates format).
+    evalId <- validateUserId "Eval"
     aliceId <- validateUserId "Alice"
     bobId <- validateUserId "Bob"
 
-    -- 3. Create users with the given rights 
-    createUser (User evalId (Some evaluator)) [CanActAs evaluator]  
+    -- DAML CONCEPT: createUser with rights
+    -- User: the identity
+    -- primaryParty: optional default party for this user
+    -- [CanActAs party]: rights granted to this user
+    createUser (User evalId (Some evaluator)) [CanActAs evaluator]
     createUser (User aliceId (Some proposer)) [CanActAs proposer]
-    createUser (User bobId (Some proposer)) [CanActAs proposer]
+    createUser (User bobId (Some proposer)) [CanActAs proposer]  -- both Alice and Bob act as proposer
 
+    -- Create an initial proposal for the sandbox environment
     submit proposer do
         createCmd ProjectProposal with
             proposer
             projectInfo = projInfo3
             evaluator
-            note = "Third proposal"   
+            note = "Third proposal"
 
 
+-- ===== TEST FIXTURE: TestProjectInfos =====
+-- Bundles the three test ProjectInfo records.
+-- DAML CONCEPT: Nested fixture records for different aspects of test data.
 data TestProjectInfos = TestProjectInfos with
     projInfo1: ProjectInfo
     projInfo2: ProjectInfo
     projInfo3: ProjectInfo
 
+-- ===== SETUP: setupProjectInfos =====
+-- DAML CONCEPT: let bindings for complex data construction
+-- Pure values built with 'let' don't touch the ledger.
+-- Only 'submit' calls write to the ledger.
 setupProjectInfos = script do
     testParties@TestParties{..} <- setupTestParties
 
     let
+        -- DAML CONCEPT: date constructor
+        -- date Year Month Day — constructs a Date value
+        -- Jan, Feb, ... are month constructors from DA.Date
         projInfo1 = ProjectInfo with
             lead = proposer
             title = "First project title"
             details = "Fundamentals certification rubric"
             soloProject = True
-            participants = Left proposer
-            budgetRequirement = None
+            participants = Left proposer   -- Either: Left = solo
+            budgetRequirement = None       -- Optional: None = no budget required
             startDate = date 2023 Jan 12
             endDate = date 2023 Jan 13
 
@@ -80,9 +122,16 @@ setupProjectInfos = script do
     return (testParties, TestProjectInfos with {projInfo1, projInfo2, projInfo3})
 
 
+-- ===== SETUP: setupAccomplishments =====
+-- Runs the full workflow: create proposals → approve → evaluate → accomplish.
+-- Returns parties, project infos, and the two Accomplishment ContractIds.
+-- DAML CONCEPT: Script composition chains
+-- Each 'submit ... do' is a separate ledger transaction.
+-- They execute sequentially; each sees the state from previous ones.
 setupAccomplishments = script do
     (testParties@TestParties{..}, testProjectInfos@TestProjectInfos{..}) <- setupProjectInfos
-    
+
+    -- Create two proposals (proposer submits)
     proposal1 <- submit proposer do
         createCmd ProjectProposal with
             proposer
@@ -97,6 +146,7 @@ setupAccomplishments = script do
             evaluator
             note = "Second proposal"
 
+    -- Evaluator approves both proposals (creates Project contracts)
     proj1Approved <- submit evaluator do
         exerciseCmd proposal1 Approve with
             evaluationDate = date 2023 Feb 10
@@ -107,6 +157,7 @@ setupAccomplishments = script do
             evaluationDate = date 2023 Mar 10
             evaluatorNote = None
 
+    -- Evaluator evaluates both projects as ready to publish (creates Accomplishment)
     proj1Accomplished <- submit evaluator do
         exerciseCmd proj1Approved Evaluate with
             todaysDate = date 2023 Feb 10

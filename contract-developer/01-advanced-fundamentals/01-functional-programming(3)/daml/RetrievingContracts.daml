@@ -1,36 +1,63 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: RetrievingContracts
+-- PURPOSE: Demonstrates how to query the ledger for contracts
+--          in Daml Script, and how to use mapA for batch operations.
+-- LEARNING FOCUS: Ledger queries in scripts, mapA
+-- ============================================================
 module RetrievingContracts where
 
 import Daml.Script
 
 
+-- ===== TEMPLATE: BankAccount =====
+-- Simple bank account used to demonstrate multi-party contract creation
+-- and batch interest application.
 template BankAccount
     with
         bank: Party
         accountOwner: Party
         balance: Decimal
     where
+        -- DAML CONCEPT: Multiple signatories
+        -- Both bank AND accountOwner must authorize creation.
+        -- WHY: A bank account is a mutual obligation — bank holds money, owner has claim.
         signatory bank, accountOwner
 
+        -- ===== CHOICE: ApplyInterest =====
+        -- Only the bank can apply interest (they control the rate).
+        -- Returns a new BankAccount contract with updated balance.
+        -- DAML CONCEPT: create this with
+        -- Modifies one field while keeping all others the same.
         choice ApplyInterest : ContractId BankAccount
             controller bank
             do
                 let
+                    -- 5% interest rate
                     newBalance = balance + (balance * 0.05)
 
                 create this with
                     balance = newBalance
 
 
-
+-- ===== SCRIPT: testAction1 =====
+-- Demonstrates:
+--   1. Creating contracts with submitMulti (multi-party authorization)
+--   2. Querying ALL contracts of a type visible to a party
+--   3. mapA to apply an action to every item in a list
 testAction1 = script do
     bank <- allocateParty "bank"
     alice <- allocateParty "Alice"
     bob <- allocateParty "Bob"
     charlie <- allocateParty "Charlie"
-   
+
+    -- DAML CONCEPT: submitMulti [signatories] [observers] do
+    -- When a contract has MULTIPLE signatories, use submitMulti to provide
+    -- all required authorizations at once.
+    -- First list = parties authorizing (signatories)
+    -- Second list = extra parties to disclose to (readAs)
     submitMulti [alice, bank][] do
         createCmd BankAccount with
             bank
@@ -48,20 +75,26 @@ testAction1 = script do
             bank
             accountOwner = charlie
             balance = 100.0
-    
+
+    -- DAML CONCEPT: query @Template party
+    -- Retrieves ALL active contracts of type 'BankAccount' visible to 'bank'.
+    -- Returns: [(ContractId BankAccount, BankAccount)]
+    -- The bank can see all three accounts because it's a signatory on each.
+    -- @BankAccount is a type application — specifies which template to query.
     allAccounts <- query @BankAccount bank
-    debug $ allAccounts
+    debug $ allAccounts   -- shows all three accounts
 
-    -- debug $ map (\x -> show x) [1,2,3] 
-    -- map (\x -> debug x) [1,2,3]
-
-    -- -- # mapA example 1
-    -- mapADebug <- mapA (\x -> debug x) [1,2,3]
-    -- debug $ mapADebug
-
-    -- -- # mapA example 2
-    -- mapADebugAcc <- mapA (\x -> debug x) allAccounts 
-    -- debug $ mapADebugAcc
-
+    -- DAML CONCEPT: mapA
+    -- mapA : Applicative m => (a -> m b) -> [a] -> m [b]
+    -- Like 'map' but for Actions (Script, Update, etc.).
+    -- Applies an action-returning function to each list element, collecting results.
+    -- WHY: Apply an operation to every contract from a query result.
+    --
+    -- Here: for each account (x._1 = ContractId, x._2 = BankAccount),
+    -- the bank submits an ApplyInterest choice exercise.
     updatedAcc <- mapA (\x -> submit bank do exerciseCmd x._1 ApplyInterest) allAccounts
-    debug $ updatedAcc
+    debug $ updatedAcc   -- list of new contract IDs after interest applied
+
+    -- EXAMPLES of other mapA uses (commented out):
+    -- mapA (\x -> debug x) [1,2,3]         -- print each element (returns [(),(),()])
+    -- mapA (\x -> debug x) allAccounts     -- print each contract

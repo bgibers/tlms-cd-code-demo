@@ -1,5 +1,28 @@
-module Upgrade3.CurrencyScript where 
+-- ============================================================
+-- MODULE: Upgrade3.CurrencyScript
+-- PURPOSE: Demonstrates the full contract upgrade flow using UpgradeModule.
+--          Migrates old Position contracts (no currency) to new Position
+--          contracts (with currency: Text field).
+-- LEARNING FOCUS: UpgradeProposal/Upgrader workflow, forA_ over upgraders,
+--                 qualified import aliasing, RunUpgrade execution
+-- ============================================================
+-- UPGRADE WORKFLOW:
+--   Phase 1: Propose (bank → counterparties)
+--     Bank creates UpgradeProposal for each counterparty (Alice, Bob)
+--   Phase 2: Accept (counterparties → bank)
+--     Alice and Bob accept → creates Upgrader contracts (both bank + party sign)
+--   Phase 3: Execute (bank runs upgrade)
+--     Bank finds all Upgrader contracts
+--     For each Upgrader: fetches counterparty's old Positions, calls RunUpgrade
+--     RunUpgrade: archives old Position, creates new Position with currency="USD"
+-- ============================================================
+module Upgrade3.CurrencyScript where
 
+-- DAML CONCEPT: qualified import aliasing
+-- `import InitialState.Cash as Old` lets us use Old.Position, Old.TransferProposal, etc.
+-- `import UpgradePackage.UpgradeModule as UpgradeModule` is similar.
+-- Without aliasing, `Position` would be ambiguous (it exists in both modules).
+-- The `as Old` alias makes it clear which module we're importing from.
 import InitialState.Cash as Old
 import InitialState.Scripts
 import UpgradePackage.UpgradeModule as UpgradeModule
@@ -9,38 +32,55 @@ import DA.Foldable (forA_)
 
 testUpgrade : Script ()
 testUpgrade = do
+  -- Start from existing cash state
   (tps@TestParties{..}, tus@TestUsers{..}) <- initCash
 
-  -- Bank proposes the upgrade to Alice
+  -- ===== PHASE 1: Bank proposes upgrade to each counterparty =====
+  -- UpgradeProposal: bank signs, counterparty observes.
+  -- WHY one proposal per party: each party must individually consent.
   submitUser uBank do
     createCmd UpgradeProposal with
       bank = pBank
       counterparty = pAlice
 
-  --Bank proposes the upgrade to Bob
   submitUser uBank do
     createCmd UpgradeProposal with
       bank = pBank
       counterparty = pBob
-    
-  -- Alice and Bob accept
+
+  -- ===== PHASE 2: Counterparties accept the upgrade proposals =====
+  -- DAML CONCEPT: query + pattern match to get the proposal
+  -- `[(pa, _)]` pattern: expects exactly ONE proposal, ignores the data part (_)
+  -- AcceptUpgrade: creates an Upgrader contract (bank + counterparty sign)
   [(pa, _)] <- query @UpgradeProposal pAlice
   submitUser uAlice do exerciseCmd pa AcceptUpgrade
   [(pb, _)] <- query @UpgradeProposal pBob
   submitUser uBob do exerciseCmd pb AcceptUpgrade
 
-  -- Get all upgraders 
+  -- ===== PHASE 3: Bank executes upgrades =====
+  -- Fetch all Upgrader contracts (one per counterparty who accepted)
   upgraders <- query @Upgrader pBank
 
-  --Get counterparties's old positions 
+  -- For each Upgrader: find the counterparty's old positions and run the upgrade
+  -- DAML CONCEPT: forA_ (from DA.Foldable)
+  -- Like mapA but discards results. Used for side-effecting iteration.
   forA_ upgraders (\(upgraderCid, upgrader) -> do
+    -- DAML CONCEPT: Old.Position — use the qualified name to get OLD contracts
+    -- `query @Old.Position` queries for InitialState.Cash.Position contracts.
+    -- Without the `Old.` prefix, it would be ambiguous.
     oldPositions <- query @Old.Position upgrader.counterparty
 
-  --Extract list of old Position Cids   
-    let 
+    -- DAML CONCEPT: `map fst` — extract ContractIds from the [(ContractId, Contract)] list
+    -- fst (contractId, contractData) = contractId
+    -- We only need the IDs to pass to RunUpgrade.
+    let
       positionCids = map fst oldPositions
 
-    submit pBank do 
-        exerciseCmd upgraderCid RunUpgrade with 
+    -- DAML CONCEPT: RunUpgrade
+    -- This choice (defined in UpgradeModule.daml) iterates over positionCids,
+    -- fetches each old Position, archives it, and creates a new one with currency added.
+    -- The `..` in `with ..` uses record puns — `positionCids = positionCids` (auto-filled).
+    submit pBank do
+        exerciseCmd upgraderCid RunUpgrade with
           ..
     )

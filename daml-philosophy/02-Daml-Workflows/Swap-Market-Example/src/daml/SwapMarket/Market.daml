@@ -1,50 +1,90 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
--- | Workfows for a trading card market app.
+-- ============================================================
+-- MODULE: SwapMarket.Market
+-- PURPOSE: The complete trading card marketplace workflow.
+--          Demonstrates a real-world multi-party system with:
+--          market membership, card offers, and atomic swaps.
+-- LEARNING FOCUS: Complex multi-party workflows, time validation,
+--                 3-party signing, divulgence, atomic settlement
+-- ============================================================
+-- WORKFLOW OVERVIEW:
+--   1. User requests to join market (MarketAppInstallRequest)
+--   2. Provider accepts → MarketAppInstall (mutual agreement)
+--   3. User creates a card offer (MarketAppInstall_OfferCard → CardOffer)
+--   4. Another market member proposes a swap (CardOffer_ProposeSwap → SwapProposal)
+--      - Proposer's card is LOCKED to guarantee settlement
+--   5. Offerer accepts, rejects, or withdraws the proposal
+--      - Accept: atomic settlement (both cards transferred)
+-- ============================================================
+-- PRIVACY DESIGN:
+--   - Alice (offerer) never learns about Bob's (proposer's) Card
+--     directly — only through divulgence during CardOffer_ProposeSwap
+--   - The provider acts as market coordinator but cannot unilaterally
+--     transfer either party's cards
+-- ============================================================
+
+-- | Workflows for a trading card market app.
 module SwapMarket.Market where
 
 import DA.Time
 import qualified DA.Text as T
 import SwapMarket.CardIssuance
 
+
+-- ===== TEMPLATE: MarketAppInstallRequest =====
+-- Step 1 of market joining: User requests membership.
+-- PATTERN: Propose-Accept for market membership.
+-- NOTE: This is minimal scaffolding — production would add validation,
+-- KYC checks, cancellation, rejection, etc.
+--
 -- | A request by a user to join the market app run by the app provider.
---   Note: This contract is the minimal scaffolding to demonstrate the swap workflow and is missing all the validation,
---         cancellation, and rejection logic we would expect to see if we did an analysis of the "join market" workflow.
 template MarketAppInstallRequest
   with
     provider : Party  -- ^ The market provider
     user : Party      -- ^ The market application user
   where
+    -- AUTH: User signs the request (they're requesting membership).
     signatory user
+    -- PRIVACY: Provider can see the request to decide.
     observer provider
 
+    -- ===== CHOICE: MarketAppInstallRequest_Accept =====
+    -- Provider accepts → creates MarketAppInstall (both sign).
     choice MarketAppInstallRequest_Accept : ContractId MarketAppInstall
       controller provider
       do
         create MarketAppInstall with provider; user
 
-    -- After further analysis we would expect additional choices here.
 
-
+-- ===== TEMPLATE: MarketAppInstall =====
+-- The active market membership — a bilateral agreement between provider and user.
+-- Both are signatories: user agreed to join, provider agreed to host.
+--
 -- | The agreement between the market operator and the user.
 template MarketAppInstall
   with
     provider : Party  -- ^ The market provider
     user : Party      -- ^ The market application user
   where
+    -- AUTH: Both provider and user must sign.
+    -- WHY: Market membership is a mutual commitment.
+    -- Provider commits to running the marketplace; user commits to the rules.
     signatory provider, user
 
-    -- |  Create an offer to deliver a particular card, if a pleasing swap proposal is made.
-    --    Note: The addition of a timeout is a production consideration to allow other stakeholder parties to clean
-    --          stale offers from the ledger in the event the offerer becomes inactive, unable, or unwilling to withdraw
-    --          offers that can no longer be fulfilled. Where the business analysis doesn't include a timeout
-    --          operational and support engineering considerations may still require one -- as in this case.
+    -- ===== CHOICE: MarketAppInstall_OfferCard =====
+    -- User creates a card offer visible to all market participants via the provider.
+    -- DAML CONCEPT: nonconsuming choice
+    -- The MarketAppInstall contract persists — user can make MULTIPLE offers.
+    -- WHY nonconsuming: one membership = potentially many offers.
+    --
+    -- | Create an offer to deliver a particular card, if a pleasing swap is made.
     nonconsuming choice MarketAppInstall_OfferCard : ContractId CardOffer
       with
         offeredCardDetails : CardDetails -- ^ The details of the offered card
         expiresAt : Time                 -- ^ Time when the offer expires
-        minProposalDuration : RelTime    -- ^ Minimum duration that a swap proposal must be good for to be considered
+        minProposalDuration : RelTime    -- ^ Minimum duration swap proposals must be valid for
       controller user
       do
         create CardOffer
@@ -56,184 +96,243 @@ template MarketAppInstall
             minProposalDuration
 
 
+-- ===== TEMPLATE: CardOffer =====
+-- A publicly visible offer to trade a specific card.
+-- The provider maintains the offer in their active contract set (the "order book").
+-- Visible to potential proposers via the provider's interface.
+--
 -- | A marketplace-wide offer to trade a particular card.
---   Note: The expectation is that the market provider is providing a market interface -- some combination of web UI or
---         mobile app in a B2C scenario, or ReST API or other web-service in a B2B scenario. The offer listings on this
---         interface will be derived from a cache of the providers active contract set (also called an operational data
---         store), and this interface will provide access to the disclosed contract bundles necessary to utilize 
---         explicit disclosure.
 template CardOffer
   with
     provider : Party                 -- ^ The market provider
     offerer : Party                  -- ^ The party making the offer
     offeredCardDetails : CardDetails -- ^ The details of the offered card
     expiresAt : Time                 -- ^ Time when the offer expires
-    minProposalDuration : RelTime    -- ^ Minimum duration that swap proposal must be good for to be considered
+    minProposalDuration : RelTime    -- ^ Minimum duration swap proposal must be valid
   where
+    -- AUTH: Both offerer AND provider must sign.
+    -- WHY: Provider authorizes this offer as a legitimate market listing.
+    -- Offerer commits to honoring the offer while it's active.
     signatory offerer, provider
 
+    -- ===== CHOICE: CardOffer_ProposeSwap =====
+    -- A market member proposes to swap their card for the offered card.
+    -- DAML CONCEPT: nonconsuming
+    -- CardOffer persists — multiple swap proposals can reference the same offer.
+    -- WHY: Offerer can review multiple proposals and accept the best one.
+    --
     -- | Propose a concrete swap for the offered card.
-    --   Note: Because this is a non-consuming choice, the CardOffer contract is unaffected by its exercise. This means
-    --         that this choice can be moved to another contract without appreciably affecting the workflow. Of course
-    --         that other contact must also satisfy the authorization and visibility requirements identified in the
-    --         business analysis. A typical alternative would be to move it to the MarketAppInstall template alongside
-    --         OfferCard. Indeed, this was preferred by multiple Digital Asset Daml engineers who reviewed this code.
     nonconsuming choice CardOffer_ProposeSwap : ContractId SwapProposal
       with
-        proposer : Party                               -- ^ The market member making proposing the swap
-        proposerMarketId : ContractId MarketAppInstall -- ^ Proof, proposer is a member of the market in good standing
-        proposedCardId : ContractId Card               -- ^ The card being proposed to swap for the offered card
-        proposalExpiresAt : Time                       -- ^ Time when the proposal expires
+        proposer : Party                               -- ^ The member proposing the swap
+        proposerMarketId : ContractId MarketAppInstall -- ^ Proof proposer is a valid member
+        proposedCardId : ContractId Card               -- ^ The card proposer is offering
+        proposalExpiresAt : Time                       -- ^ When this proposal expires
       controller proposer
       do
+        -- VALIDATION 1: Offer must not be expired
         ensureNotExpired "CardOffer" expiresAt
 
-        -- Validate proposal expiry time
+        -- VALIDATION 2: Proposal duration must be reasonable
         now <- getTime
         require "Proposal expires before offer" (proposalExpiresAt <= expiresAt)
         require "Proposal duration is large enough" (minProposalDuration <= proposalExpiresAt `subTime` now)
+        -- WHY duration check: offerer needs enough time to review and accept.
+        -- subTime: Time -> Time -> RelTime (time difference)
 
-        -- Validate proposer is a market member
+        -- VALIDATION 3: Proposer must be a valid market member
         proposerMarket <- fetch proposerMarketId
         require "Proposer must be a member of the same market" (proposerMarket.provider == provider)
         require "Proposer must be a member of the market" (proposerMarket.user == proposer)
 
-        -- Validate proposed card
-        -- The signatories see ALL the details of EVERY use of their authorization, so the offerer will see the details
-        -- of the proposed card via this fetch. This is called divulgence, and can be used as an alternative to
-        -- explicit disclosure in versions of Daml prior to the introduction of Explicit Disclosure. You will need to be
-        -- careful the offerer stores this before the details are lost during participant node pruning. Also you will
-        -- need to track it separately from "active contracts", as the offerer will not be informed of any archive
-        -- event. Either of these is sufficient reason to migrate to Explicit Disclosure when it is available to you.
+        -- VALIDATION 4: Proposer must own the card they're proposing
+        -- DAML CONCEPT: DIVULGENCE via fetch inside a choice
+        -- Because offerer and provider are signatories of CardOffer, and this choice
+        -- is exercised within their authorization context, the 'fetch proposedCardId'
+        -- DIVULGES the Card details to the offerer (and provider).
+        -- This means offerer can see the proposed card's details even though they're
+        -- not an observer of that Card. This is divulgence.
+        -- NOTE: Offerer should cache this before the ledger prunes it.
+        -- NOTE: Migration path → Explicit Disclosure (available in newer SDK versions).
         proposedCard <- fetch proposedCardId
         require "Proposer is owner" (proposedCard.owner == proposer)
 
-        -- Lock card to all three parties to ensure that the swap proposal stays valid until its expiry
-        -- There is an asymmetry here between the Offerer and the Proposer, as only the Proposer is required to lock
-        -- their card. This is easy to change if symmetry is desired. One effect of only requiring the Offerer to
-        -- provide the card at Accept is to leave this offer open so the Offerer can accept multiple proposals if they
-        -- are in possession of multiple copies of the offered card. It is a very worthwhile exercise to see how to 
-        --   a) Guarantee the Offer is archived when a Proposal is Accepted; or,
-        --   b) Guarantee the Offer is archived when N Proposals have been Accepted; or,
-        --   c) Require the Offerer to lock with the Market Provider sufficient cards to cover all N offered swaps
-        lockedCardId <- exercise proposedCardId Card_Lock with 
-          lock = TimeLock with 
+        -- LOCK the proposer's card to prevent double-spending during negotiation
+        -- DAML CONCEPT: exercise inside a choice (chained operation)
+        -- This atomically validates AND locks the card in one transaction.
+        -- holders: all three parties must jointly unlock (or expire after deadline)
+        lockedCardId <- exercise proposedCardId Card_Lock with
+          lock = TimeLock with
             holders = [provider, offerer, proposer]
-            expiresAt
-        
+            expiresAt   -- same expiry as the proposal
+
+        -- Create the SwapProposal — now the locked card guarantees settlement
         create SwapProposal with
           provider
           offerer
           offeredCardDetails
           proposer
-          proposedCardId = lockedCardId
+          proposedCardId = lockedCardId   -- reference to the LOCKED card
           expiresAt
 
+    -- ===== CHOICE: CardOffer_Withdraw =====
+    -- Offerer withdraws their offer voluntarily.
     choice CardOffer_Withdraw : ()
       controller offerer
-      do 
-        pure ()
+      do
+        pure ()   -- simply archives the offer (consuming choice)
 
+    -- ===== CHOICE: CardOffer_Expire =====
+    -- Any stakeholder can archive an expired offer.
+    -- DAML CONCEPT: Open expiry — any stakeholder can trigger cleanup.
+    -- WHY: If offerer goes inactive, the offer would clog the ledger forever.
+    -- The provider (or even proposer) can clean it up after expiry.
     choice CardOffer_Expire : ()
       with
-        actor : Party -- ^ Any stakeholder to this contract
+        actor : Party -- ^ Any stakeholder of this contract
       controller actor
-      do 
-        expireAs actor this "CardOffer" expiresAt  
+      do
+        expireAs actor this "CardOffer" expiresAt
 
 
+-- ===== DATA TYPE: SwapResult =====
+-- DAML CONCEPT: Return multiple ContractIds from a choice
+-- When Accept succeeds, both parties get new cards.
+-- Wrap them in a record to return both at once.
 data SwapResult =
   SwapResult with
-    offerersNewCardId : ContractId Card
-    proposersNewCardId : ContractId Card
+    offerersNewCardId : ContractId Card    -- the card the offerer now holds
+    proposersNewCardId : ContractId Card   -- the card the proposer now holds
 
+
+-- ===== TEMPLATE: SwapProposal =====
+-- A concrete proposal to swap two specific cards.
+-- THREE-PARTY SIGNATORY — all three must authorize its existence.
+-- This is the most complex authorization structure in the system.
+--
 -- | A time-limited proposal to swap a card with immediate settlement
 template SwapProposal
   with
     provider : Party                        -- ^ The market provider
     offerer : Party                         -- ^ The swap offerer
     proposer : Party                        -- ^ The swap proposer
-    offeredCardDetails : CardDetails        -- ^ The card details from the offer the proposer has agreed to accept
-    proposedCardId : ContractId LockedCard  -- ^ The proposer's card locked to this proposal to guarantee settlement
-    expiresAt : Time                        -- ^ Time when the proposal expires
+    offeredCardDetails : CardDetails        -- ^ Expected card from offerer
+    proposedCardId : ContractId LockedCard  -- ^ Proposer's card (locked, guaranteed)
+    expiresAt : Time                        -- ^ When the proposal expires
   where
+    -- AUTH: ALL THREE parties must sign.
+    -- WHY provider: market operator must approve; prevents unauthorized use of market
+    -- WHY offerer: their card is at stake; they must commit to the offer
+    -- WHY proposer: they initiated the proposal; they must be accountable
+    -- This is a true three-party agreement — no one can impose it on another.
     signatory provider, offerer, proposer
 
+    -- ===== CHOICE: SwapProposal_Accept =====
+    -- ATOMIC SETTLEMENT: Both cards are transferred in one transaction.
+    -- Either BOTH transfers happen, or NEITHER does (Daml atomicity guarantee).
+    -- This prevents partial settlements (e.g., offerer gets card but proposer doesn't).
     choice SwapProposal_Accept : SwapResult
       with
-        offeredCardId : ContractId Card -- ^ The offerer's card to be included in the swap settlement
-      controller offerer
+        offeredCardId : ContractId Card -- ^ The offerer's card to include in settlement
+      controller offerer   -- offerer decides to accept (they're giving their card)
       do
+        -- VALIDATION: Proposal must not be expired
         ensureNotExpired "SwapProposal" expiresAt
 
-        -- Validate and transfer offered card
-        -- Note: This pattern of "fetch and validate" is essential in most cases where you are accepting contract ids
-        --       as arguments. In particular it is critical to verify that the contract signatories are as expected.
+        -- VALIDATION: Verify the offered card is legitimate
+        -- PATTERN: "Fetch and validate" before accepting ContractId arguments.
+        -- SECURITY: Without this check, offerer could provide a different card.
         offeredCard <- fetch offeredCardId
         require "offerer is owner" (offeredCard.owner == offerer)
         require "Card details match" (offeredCard.cardDetails == offeredCardDetails)
+
+        -- SETTLEMENT STEP 1: Transfer offered card to proposer
+        -- Card_Transfer requires both owner AND newOwner to authorize.
+        -- offerer is the controller of SwapProposal_Accept → provides owner auth.
+        -- proposer is a signatory of SwapProposal → provides newOwner auth.
         proposersNewCardId <- exercise offeredCardId Card_Transfer with newOwner = proposer
 
-        -- Unlock and transfer proposed card
+        -- SETTLEMENT STEP 2: Unlock proposer's card, then transfer to offerer
+        -- Unlock requires all lock holders [provider, offerer, proposer] — all are
+        -- signatories of this choice, so all authorizations are available.
         proposedCardId <- exercise proposedCardId LockedCard_Unlock
         offerersNewCardId <- exercise proposedCardId Card_Transfer with newOwner = offerer
-        
+
+        -- Return both new card IDs so callers know which contracts to use
         pure SwapResult with offerersNewCardId; proposersNewCardId
 
+    -- ===== CHOICE: SwapProposal_Reject =====
+    -- Offerer rejects the proposal — proposer's card is unlocked immediately.
+    -- WHY unlock eagerly: no reason to keep the card locked if rejected.
     choice SwapProposal_Reject : ContractId Card
       with
-        reason : Text -- ^ Visible to all witnesses to the exercise via the ledger API
+        reason : Text -- ^ Visible to all witnesses in the ledger API
       controller offerer
       do
-        -- Limit length of reason to avoid wasted resources
-        assert $ T.length reason < 200 
+        -- Limit reason length to prevent abuse (wasted ledger storage)
+        -- DA.Text.length counts Unicode characters
+        assert $ T.length reason < 200
 
         ensureNotExpired "SwapProposal" expiresAt
-        -- Unlock eagerly to avoid that the owner has to wait for the lock to expire
+        -- Unlock immediately — proposer doesn't have to wait for lock expiry
         exercise proposedCardId LockedCard_Unlock
 
+    -- ===== CHOICE: SwapProposal_Withdraw =====
+    -- Proposer withdraws their own proposal — unlocks their card.
     choice SwapProposal_Withdraw : ContractId Card
       controller proposer
-      do 
+      do
         ensureNotExpired "SwapProposal" expiresAt
-        -- Unlock eagerly to avoid that the owner has to wait for the lock to expire
         exercise proposedCardId LockedCard_Unlock
-    
+
+    -- ===== CHOICE: SwapProposal_Expire =====
+    -- Any stakeholder expires the proposal after deadline.
+    -- NOTE: Only the proposal is expired here — the LockedCard expires separately.
+    -- WHY separate: minimizes coupling between cleanup steps.
+    -- Each contract manages its own lifecycle.
     choice SwapProposal_Expire : ()
       with
-        actor : Party -- ^ Any stakeholder to this contract
+        actor : Party -- ^ Any stakeholder of this contract
       controller actor
-      do 
-        -- Note: We intentionally only expire this contract, as the locked card will expire on its own. The goal is to
-        --       minimize the coupling of the cleanup steps.
-        expireAs actor this "SwapProposal" expiresAt  
+      do
+        expireAs actor this "SwapProposal" expiresAt
 
 
--- Expiry utilities
--------------------
+-- ============================================================
+-- UTILITY FUNCTIONS
+-- ============================================================
+-- DAML CONCEPT: Module-level utility functions
+-- These are pure functions (or Update-returning functions) that
+-- can be called from multiple choices to reduce code duplication.
+-- ============================================================
 
+-- | Verify that a stakeholder is triggering expiry on an expired contract.
+-- HasSignatory and HasObserver constraints: 't' must have stakeholders.
+-- stakeholder: returns all signatories + observers of a contract.
 expireAs : (HasSignatory t, HasObserver t) => Party -> t -> Text -> Time -> Update ()
 expireAs actor contract name expiresAt = do
   ensureExpired name expiresAt
   require "Actor is a stakeholder" (actor `elem` stakeholder contract)
 
 
+-- | Abort if the named object has already expired.
 ensureNotExpired : Text -> Time -> Update ()
 ensureNotExpired object expiresAt = do
   now <- getTime
   require (object <> " not yet expired") (now < expiresAt)
 
+
+-- | Abort if the named object has not yet expired.
 ensureExpired : Text -> Time -> Update ()
 ensureExpired object expiresAt = do
   now <- getTime
   require (object <> " expired") (expiresAt <= now)
 
 
--- Assertion utilities
-----------------------
-
- -- | Check whether a required condition is true. If it's not, abort the
--- transaction with a message saying that the requirement was not met.
+-- | Abort with a formatted message if the condition is not met.
+-- DAML CONCEPT: CanAssert constraint
+-- CanAssert means this works in both Update and Script contexts.
+-- Wraps assertMsg with a more readable error format.
 require : CanAssert m => Text -> Bool -> m ()
 require msg condition =
-  assertMsg ("The requirement '" <> msg <> "' was not met.") condition 
+  assertMsg ("The requirement '" <> msg <> "' was not met.") condition

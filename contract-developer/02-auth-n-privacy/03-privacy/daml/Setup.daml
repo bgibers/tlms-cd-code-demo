@@ -1,20 +1,47 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: Setup (02-auth-n-privacy/03-privacy)
+-- PURPOSE: Provides shared test party setup for the privacy module tests.
+--          Centralizes party allocation so all test files use the same
+--          party names and structure.
+-- LEARNING FOCUS: TestParties fixture, `pure ... with ..` shorthand
+-- ============================================================
+-- PATTERN: Shared test fixture
+-- `setupTestParties` creates all parties once.
+-- All test modules import and call this function to get a consistent
+-- set of parties. This is DRY (Don't Repeat Yourself) for tests.
+--
+-- Parties in this module's tests:
+--   alice, bob — individual users doing transfers
+--   ub (US_Bank) — issues USD assets
+--   eb (EU_Bank) — issues EUR assets
+-- ============================================================
 module Setup where
 import Daml.Script
 
+-- DAML CONCEPT: TestParties record
+-- Bundles all parties in one record so test functions can use record
+-- destructuring: `TestParties{alice, bob, ub, eb} <- setupTestParties`
+-- or with the `@` pattern: `testParties@TestParties{..} <- setupTestParties`
 data TestParties = TestParties with
     alice: Party
     bob: Party
-    ub: Party
-    eb: Party
+    ub: Party   -- US Bank: issues US Dollar assets
+    eb: Party   -- EU Bank: issues Euro assets
 
+-- DAML CONCEPT: setupTestParties returns the TestParties record
+-- `allocateParty "Name"` allocates a fresh party on the ledger.
+-- The string is the human-readable display name.
 setupTestParties = script do
     alice <- allocateParty "Alice"
     bob <- allocateParty "Bob"
     ub <- allocateParty "US_Bank"
     eb <- allocateParty "EU_Bank"
 
+    -- DAML CONCEPT: `pure TestParties with ..`
+    -- `with ..` uses record pun syntax — auto-fills fields where
+    -- local variable names match field names.
+    -- alice=alice, bob=bob, ub=ub, eb=eb — all punned automatically.
     pure TestParties with ..
-

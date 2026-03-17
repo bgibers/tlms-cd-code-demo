@@ -1,54 +1,63 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: BuiltInVariants
+-- PURPOSE: Shows how Daml's built-in Bool and Optional types
+--          are just regular sum types — by reimplementing them.
+-- LEARNING FOCUS: Sum types (variant types) and how they work
+-- ============================================================
+-- KEY INSIGHT: Bool and Optional are NOT magic keywords in Daml.
+-- They are ordinary data types defined in the standard library.
+-- This file hides those definitions and recreates them from scratch.
+-- ============================================================
 module BuiltInVariants where
 
 import Daml.Script
+-- DAML CONCEPT: Selective hiding from Prelude
+-- 'hiding' lets us shadow built-in names with our own definitions.
+-- This is educational — in real code, don't shadow built-ins!
 import Prelude hiding(Bool(True, False), Optional(None, Some))
 
-data Bool = True | False 
+
+-- ===== CUSTOM BOOL =====
+-- DAML CONCEPT: Sum type (variant type / enumeration)
+-- A sum type has multiple constructors, each representing a different variant.
+-- 'data Bool = True | False' means: a Bool is EITHER True OR False (never both).
+-- The | separates variants.
+-- WHY it's called "sum": the number of values = sum of each variant's values
+--   Bool has 2 possible values: True or False.
+-- NOTE: 'deriving (Eq, Show)' auto-generates equality and string-conversion.
+data Bool = True | False
     deriving (Eq,Show)
 
 testB = script do
-    let 
-        bln : Bool
-        bln = True 
+    let
+        bln : Bool   -- explicit type annotation
+        bln = True
 
-    debug $ bln
+    debug $ bln   -- Output: True
 
 
-data Optional a = None | Some a 
+-- ===== CUSTOM OPTIONAL =====
+-- DAML CONCEPT: Parameterized sum type
+-- 'Optional a' has a TYPE PARAMETER 'a' — it's generic/polymorphic.
+-- Two constructors:
+--   None   = absence (no type parameter needed — no value stored)
+--   Some a = presence (stores a value of type 'a')
+-- This is identical to Haskell's 'Maybe' type, or Java's Optional<T>.
+-- WHY: Represent optional values without using null (which causes null pointer errors).
+data Optional a = None | Some a
     deriving (Eq,Show)
 
 
-testO = script do 
-    let 
-        os : Optional Int 
+testO = script do
+    let
+        os : Optional Int   -- "optional integer" — might be Some Int or None
         os = Some 0
 
-        on : Optional ()
+        on : Optional ()    -- "optional unit" — None represents "absent"
         on = None
 
-    debug $ os
-    debug $ on
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
+    debug $ os   -- Output: Some 0
+    debug $ on   -- Output: None

@@ -1,45 +1,87 @@
-module Upgrade3.Currency where 
+-- ============================================================
+-- MODULE: Upgrade3.Currency
+-- PURPOSE: The NEW version of Position with an added `currency` field.
+--          This is the TARGET state after a schema upgrade.
+--          Old Position contracts (from InitialState.Cash) must be migrated
+--          to this new format using the UpgradePackage.UpgradeModule pattern.
+-- LEARNING FOCUS: Schema upgrade target, new mandatory field, migration context
+-- ============================================================
+-- DAML CONCEPT: Schema Upgrade
+-- We want to ADD a `currency: Text` field to Position.
+-- Problem: Existing Position contracts on the ledger don't have this field.
+-- Solution: Create a NEW template (this file) and MIGRATE old contracts to the new format.
+--
+-- Migration workflow (see CurrencyScript.daml):
+--   1. Bank creates UpgradeProposal contracts for each counterparty
+--   2. Counterparties accept → creates Upgrader contracts
+--   3. Bank exercises RunUpgrade on each Upgrader:
+--      - Fetches OLD Position contracts (from InitialState.Cash)
+--      - Archives them
+--      - Creates NEW Position contracts (from this module) with currency field added
+--   4. Old contracts gone; new contracts with currency field exist
+--
+-- WHY two-party agreement for migration?
+-- Both bank AND the contract holder must agree to the upgrade.
+-- This protects contract holders from having their assets silently changed.
+-- ============================================================
+module Upgrade3.Currency where
 
-template Position 
-    with 
-        issuer: Party 
-        owner: Party 
+-- ===== TEMPLATE: Position (v2 — with currency field) =====
+-- Identical to InitialState.Cash.Position EXCEPT for the `currency` field.
+-- This is the target schema after migration.
+template Position
+    with
+        issuer: Party
+        owner: Party
         obs: [Party]
-        quantity: Decimal 
-        currency: Text 
+        quantity: Decimal
+        currency: Text      -- NEW FIELD: what currency this position represents (e.g., "USD", "EUR")
 
-    where 
+    where
         signatory [issuer, owner]
         observer obs
 
         ensure quantity > 0.0
 
+        -- ProposeTransfer: creates a TransferProposal for this v2 Position
         choice ProposeTransfer : ContractId TransferProposal
             with
                 newOwner : Party
             controller owner
             do
-                create TransferProposal with 
+                create TransferProposal with
                     position = this
                     newOwner
-                    
+
+        -- DAML CONCEPT: Multi-controller choice
+        -- `controller [owner, newOwner]` requires BOTH to authorize simultaneously.
+        -- This is a "mutual consent" transfer — prevents unwanted transfers.
+        -- Compare with the proposal-accept pattern (ProposeTransfer/TransferProposal_Accept)
+        -- which is the same goal but split into two separate transactions.
         choice Transfer : ContractId Position
             with
                 newOwner : Party
-            controller [owner, newOwner]
+            controller [owner, newOwner]  -- Both must authorize in same transaction
             do
-                create this with 
+                create this with
                     owner = newOwner
-                    obs = []
+                    obs = []  -- Clear observers on transfer (new owner starts fresh)
 
 
 
+-- ===== TEMPLATE: TransferProposal for v2 Position =====
 template TransferProposal
   with
-    position : Position
+    position : Position   -- Carries the FULL position record (including currency field)
     newOwner : Party
   where
+    -- DAML CONCEPT: derived signatory
+    -- `signatory (signatory position)` inherits the signatories from the position.
+    -- So both issuer and owner of the position must have authorized creation.
     signatory (signatory position)
+    -- DAML CONCEPT: `::` cons operator with observer list
+    -- `newOwner::(observer position)` prepends newOwner to the existing observers.
+    -- This ensures newOwner can see the proposal (they need to accept it).
     observer newOwner::(observer position)
 
     choice Accept : ContractId Position
@@ -48,10 +90,9 @@ template TransferProposal
         create position with
           owner = newOwner
           obs = []
-        
 
 
     choice Cancel : ContractId Position
       controller position.owner
       do
-        create position    
+        create position

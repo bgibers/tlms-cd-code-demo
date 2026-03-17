@@ -1,11 +1,31 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: Setup (04-exception-handling(1))
+-- PURPOSE: Demonstrates how exception handling interacts with contract
+--          creation. The `ensure` clause on a template throws
+--          PreconditionFailed when violated — this test provokes it.
+-- LEARNING FOCUS: ensure clause, PreconditionFailed, ChangeAlias pattern,
+--                 deliberate error triggering for demo purposes
+-- ============================================================
+-- INTENTIONAL ERROR NOTE:
+-- This script deliberately exercises ChangeAlias with newAlias = ""
+-- which VIOLATES the `ensure alias /= ""` clause and throws PreconditionFailed.
+-- This is meant to show the error in the IDE/test output, NOT to pass.
+-- See the TryCatch.daml module for how to HANDLE this exception gracefully.
+-- ============================================================
 module Setup where
 
 import Daml.Script
 
 
+-- ===== TEMPLATE: SocialNetworkUser =====
+-- DAML CONCEPT: ensure clause
+-- `ensure alias /= ""` runs every time a contract of this type is CREATED.
+-- If the condition is False, the creation throws PreconditionFailed.
+-- This applies not just to `createCmd` but also to choices that `create this with ...`.
+-- So ChangeAlias below will also trigger the ensure check.
 template SocialNetworkUser
     with
         username: Party
@@ -15,20 +35,26 @@ template SocialNetworkUser
         signatory username
         observer following
 
-        key username : Party 
-        maintainer key 
+        key username : Party
+        maintainer key
 
+        -- ensure clause: empty alias is invalid
         ensure alias /= ""
 
         choice Follow: ContractId SocialNetworkUser
             with
                 userToFollow: Party
             controller username
-            do       
+            do
                 assertMsg "You cannot follow yourself" (userToFollow /= username)
                 assertMsg "You cannot follow the same user twice" (notElem userToFollow following)
                 create this with following = userToFollow :: following
 
+        -- DAML CONCEPT: ChangeAlias — simple consuming update choice
+        -- Archives the current contract and creates a new one with a different alias.
+        -- The `create this with alias = newAlias` triggers the `ensure alias /= ""`
+        -- check on the NEW contract being created.
+        -- If newAlias is "", PreconditionFailed is thrown.
         choice ChangeAlias: ContractId SocialNetworkUser
             with
                 newAlias: Text
@@ -38,6 +64,12 @@ template SocialNetworkUser
                     alias = newAlias
 
 
+-- ===== TEST: Demonstrates PreconditionFailed from ensure =====
+-- DAML CONCEPT: Deliberate error demonstration
+-- The script calls ChangeAlias with newAlias = "" — an empty string.
+-- The ensure clause `alias /= ""` evaluates to False for the NEW contract.
+-- Result: PreconditionFailed exception is thrown.
+-- WHY show this: Understanding when ensure fires is critical for debugging.
 test = script do
     alice <- allocateParty "Alice"
     bob <- allocateParty "Bob"
@@ -47,6 +79,10 @@ test = script do
             username = alice
             following = []
             alias = "aliceAlias"
-    
-    submit alice do 
+
+    -- INTENTIONAL ERROR: newAlias = "" violates ensure alias /= ""
+    -- This triggers PreconditionFailed on the recreated SocialNetworkUser.
+    -- In a real scenario, use try-catch (see TryCatch.daml) or
+    -- validate the alias BEFORE calling ChangeAlias.
+    submit alice do
         exerciseCmd aliceCid ChangeAlias with newAlias = ""

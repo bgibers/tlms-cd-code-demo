@@ -1,61 +1,62 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: InformativeTypes
+-- PURPOSE: Demonstrates Either and Optional — the two main
+--          types for representing "informative" success/failure.
+-- LEARNING FOCUS: Error handling WITHOUT exceptions
+-- ============================================================
+-- WHY: In Daml, choices often return Either or Optional to signal
+--      success/failure without crashing the transaction.
+--      This is safer and more composable than exceptions.
+-- ============================================================
 module InformativeTypes where
 
-import Daml.Script 
+import Daml.Script
 
 
--- Either
+-- ===== EITHER =====
+-- DAML CONCEPT: Either type
+-- Either a b has two constructors:
+--   Left  a  = conventionally "failure" or "error"
+--   Right b  = conventionally "success" or "result"
+-- WHY "Either": the value is EITHER of type a OR of type b.
+-- PATTERN: Return Either from functions/choices that can fail with meaningful info.
+--
+-- Usage in choices:
+--   choice Foo: Either ErrorType SuccessType
+--   ...
+--   if valid then return (Right result)
+--   else     return (Left errorInfo)
 someFunction: Int -> Either Text Int
 someFunction x =
+   -- Returns Left "Error" for negative numbers (failure case)
+   -- Returns Right (x+2) for non-negative (success case)
    if (x < 0) then
-        Left "Error"
-   else Right (x + 2)
+        Left "Error"         -- Left wraps the error value
+   else Right (x + 2)       -- Right wraps the success value
 
 
 testSF = script do
-    debug $ someFunction (-2)
-    debug $ someFunction 2
+    debug $ someFunction (-2)  -- Output: Left "Error"
+    debug $ someFunction 2     -- Output: Right 4
 
 
-
-
-
-
--- Optional
+-- ===== OPTIONAL =====
+-- DAML CONCEPT: Optional type
+-- Optional a has two constructors:
+--   None   = absence of a value (like null, nil, undefined)
+--   Some a = presence of a value
+-- WHY Optional: avoids null pointer errors by making absence EXPLICIT in the type.
+-- PATTERN: Use Optional for values that might not exist (e.g., fees, notes, recipients).
+--
+-- To unwrap: case opt of { None -> ...; Some x -> ... }
+-- Or use: fromOptional defaultValue opt
 safeDiv : Int -> Int -> Optional Int
-safeDiv _ 0 = None
+safeDiv _ 0 = None        -- _ wildcard: we don't care about the dividend when divisor is 0
 safeDiv x y = Some (x / y)
 
 testSD = script do
-    debug $ safeDiv 6 0 
-    debug $ safeDiv 6 2 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    debug $ safeDiv 6 0   -- Output: None      (division by zero — return None not crash!)
+    debug $ safeDiv 6 2   -- Output: Some 3

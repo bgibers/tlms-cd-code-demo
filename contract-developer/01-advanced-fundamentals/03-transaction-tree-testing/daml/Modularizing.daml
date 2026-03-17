@@ -1,6 +1,20 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: Modularizing
+-- PURPOSE: Shows how to write modular, reusable Daml Scripts
+--          using helper functions and TestParties records.
+-- LEARNING FOCUS: Test organization, record unpacking, script composition
+-- ============================================================
+-- PATTERN: Modular test setup
+--   1. Define a TestParties record to hold allocated parties
+--   2. Write a setupParties script function
+--   3. Write a setupContract script function
+--   4. Compose them in test scripts
+-- WHY: Avoids repeating party allocation in every test. Each test
+--      calls the setup functions and gets a clean starting state.
+-- ============================================================
 module Modularizing where
 
 import Daml.Script
@@ -15,8 +29,8 @@ template SocialNetworkUser
         signatory username
         observer following
 
-        key username : Party 
-        maintainer key 
+        key username : Party
+        maintainer key
 
         ensure alias /= ""
 
@@ -24,17 +38,28 @@ template SocialNetworkUser
             with
                 userToFollow: Party
             controller username
-            do       
+            do
                 assertMsg "You cannot follow yourself" (userToFollow /= username)
                 assertMsg "You cannot follow the same user twice" (notElem userToFollow following)
                 create this with following = userToFollow :: following
 
 
+-- ===== TEST FIXTURE: TestParties =====
+-- DAML CONCEPT: Test fixture record
+-- A record that bundles all test parties together.
+-- WHY: Setup functions return TestParties; test functions destructure it.
+-- This avoids threading individual party variables through every function.
+-- PATTERN: Always define a TestParties (or similar) record for multi-party tests.
 data TestParties = TestParties with
     alice: Party
     bob: Party
 
 
+-- ===== SETUP: setupParties =====
+-- DAML CONCEPT: Script that returns a value
+-- Scripts can return values (not just perform side effects).
+-- allocateParty allocates a fresh party on the ledger with the given display name.
+-- NOTE: 'return' lifts a pure value into the Script context.
 setupParties : Script TestParties
 setupParties = do
     alice <- allocateParty "Alice"
@@ -45,47 +70,65 @@ setupParties = do
             bob = bob
 
 
+-- ===== SETUP: setupContract =====
+-- A reusable function to create a SocialNetworkUser for any party.
+-- WHY parameterized: can be reused for alice, bob, charlie, etc.
 setupContract : Party -> Script (ContractId SocialNetworkUser)
 setupContract p = do
     submit p do
         createCmd SocialNetworkUser with
-            username = p 
+            username = p
             following = []
             alias = "defaultAlias"
 
 
+-- ===== TEST: canFollow =====
+-- DAML CONCEPT: Script composition
+-- Calls setupParties and setupContract, then exercises Follow.
+-- Scripts compose — call one script function from another.
 canFollow : Script (TestParties, ContractId SocialNetworkUser)
 canFollow = do
     testParties <- setupParties
 
+    -- Access record fields with dot notation
     aliceCid <- setupContract testParties.alice
 
     followedCid <- submit testParties.alice do
         exerciseCmd aliceCid Follow with
             userToFollow = testParties.bob
 
+    -- 'pure' is the same as 'return' — lifts a value into the Action context
     pure (testParties, followedCid)
 
 
-
+-- ALTERNATIVE: Using record unpacking syntax @TestParties{alice, bob}
 -- canFollow : Script (TestParties, ContractId SocialNetworkUser)
 -- canFollow = do
 --     testParties@TestParties{alice, bob} <- setupParties
-
+--     -- DAML CONCEPT: @ binding with record destructuring
+--     -- 'testParties@TestParties{alice, bob}' binds the whole record to testParties
+--     -- AND binds 'alice' and 'bob' directly as local variables.
+--     -- This avoids writing testParties.alice and testParties.bob everywhere.
 --     aliceCid <- setupContract alice
-
 --     followedCid <- submit alice do
---         exerciseCmd aliceCid Follow with
---             userToFollow = bob
-
+--         exerciseCmd aliceCid Follow with userToFollow = bob
 --     pure (testParties, followedCid)
 
 
-
+-- ===== TEST: cannotViolateUniqueKey =====
+-- DAML CONCEPT: Testing key uniqueness constraints
+-- Chains canFollow (which creates alice's contract) then verifies
+-- that creating a duplicate fails.
 cannotViolateUniqueKey : Script ()
 cannotViolateUniqueKey = do
+    -- DAML CONCEPT: @ binding with {..} wildcard destructure
+    -- 'testParties@TestParties{..}' binds the whole record AND brings all
+    -- its fields into scope (alice and bob) without listing them explicitly.
+    -- {..} = "bring all fields into scope" (RecordWildCards extension)
     (testParties@TestParties{..}, followedCid) <- canFollow
 
+    -- alice already has a SocialNetworkUser contract (key = alice).
+    -- Creating another would duplicate the key — must fail.
     submitMustFail alice do
         createCmd SocialNetworkUser with
             username = alice

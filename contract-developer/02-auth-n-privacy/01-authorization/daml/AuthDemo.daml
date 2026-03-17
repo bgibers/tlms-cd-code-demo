@@ -1,19 +1,46 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: AuthDemo
+-- PURPOSE: Demonstrates Daml's authorization model:
+--          signatories, controllers, fetch, and the
+--          PaymentChannel pattern for indirect authorization.
+-- LEARNING FOCUS: How authorization works on the Canton ledger
+-- ============================================================
+-- DAML AUTHORIZATION MODEL:
+--   - Signatories MUST authorize contract creation (they cryptographically sign)
+--   - Controllers can exercise choices (authorization for one action)
+--   - Authorization is per-transaction — you must be a controller to exercise
+--   - Authorization does NOT propagate: being a controller on A doesn't let you
+--     exercise choices on B (non-transitivity — see NonTransitive.daml)
+-- ============================================================
 module AuthDemo where
 
 import Daml.Script
 
+-- ===== TEMPLATE: Iou (I Owe You) =====
+-- An IOU represents a debt obligation between issuer and owner.
+-- WHY mutual signatories: both parties are committed — issuer owes, owner holds claim.
 template Iou
   with
-    issuer : Party
-    owner : Party
+    issuer : Party    -- the party issuing the IOU (they owe the amount)
+    owner : Party     -- the party holding the IOU (they are owed)
     amount : Decimal
     currency : Text
   where
+    -- AUTH: Both issuer AND owner must authorize creation.
+    -- This means both parties agree to the IOU existing on the ledger.
+    -- Neither can create an IOU on behalf of the other unilaterally.
     signatory issuer, owner
 
+    -- ===== CHOICE: Mutual_Transfer =====
+    -- DAML CONCEPT: Multi-controller choice
+    -- controller owner, newOwner means BOTH must authorize this choice.
+    -- WHY mutual: the new owner must CONSENT to receiving the IOU.
+    -- This prevents spam transfers where someone dumps obligations on others.
+    -- SECURITY: Without mutual consent, owner could transfer to any party, forcing
+    -- them to be signatories of a contract they didn't agree to.
     choice Mutual_Transfer: ContractId Iou
       with
         newOwner : Party
@@ -23,32 +50,71 @@ template Iou
           owner = newOwner
 
 
+-- ===== TEMPLATE: PaymentChannel =====
+-- PATTERN: PaymentChannel (indirect authorization)
+-- A pre-authorized channel that allows 'sender' to exercise transfers
+-- on behalf of a route (sender → receiver).
+-- WHY: Alice (sender) needs to send an IOU to Bob (receiver), but Mutual_Transfer
+-- requires BOTH sender and newOwner to authorize. PaymentChannel pre-authorizes
+-- the receiver's side by making the receiver the signatory.
 template PaymentChannel
   with
-    sender : Party
-    receiver : Party
+    sender : Party    -- can exercise Send_Iou through this channel
+    receiver : Party  -- will receive IOUs sent through this channel
   where
+    -- AUTH: Only the RECEIVER creates the channel.
+    -- The receiver is committing to accept IOUs from sender via this channel.
+    -- This is the receiver pre-authorizing their participation in future transfers.
     signatory receiver
+
+    -- AUTH: Sender is an observer — they can see the channel exists but don't authorize it.
     observer sender
 
+    -- ===== CHOICE: Send_Iou =====
+    -- DAML CONCEPT: nonconsuming choice with fetch + exercise
+    -- The sender uses this pre-authorized channel to transfer an IOU to the receiver.
+    -- nonconsuming: channel stays active — sender can use it multiple times.
     nonconsuming choice Send_Iou: ContractId Iou
       with
-        iouCid : ContractId Iou
+        iouCid : ContractId Iou   -- the IOU to transfer
       controller sender
       do
+        -- DAML CONCEPT: fetch
+        -- 'fetch cid' retrieves the contract data for a given ContractId.
+        -- Returns the template record (not the ContractId).
+        -- AUTHORIZATION: The fetching party must be a stakeholder of the fetched contract
+        -- OR the fetch must be inside a choice exercised by a signatory of that contract.
+        -- NOTE: fetch DOES NOT archive the contract — it just reads it.
         iou <- fetch iouCid
-        debug iou
+        debug iou   -- logs the IOU to the IDE console (for learning/debugging)
+
+        -- DAML CONCEPT: assert
+        -- 'assert condition' aborts with a generic error if condition is False.
+        -- Like assertMsg but without a custom message.
         assert (iou.amount > 0.0)
-        assert (sender == iou.owner)
+        assert (sender == iou.owner)   -- verify sender actually owns this IOU
+
+        -- DAML CONCEPT: exercise inside a choice
+        -- One choice can exercise other choices on other contracts.
+        -- This is how multi-step workflows are composed.
+        -- The authorization for Mutual_Transfer (owner + newOwner) is satisfied:
+        --   - sender is the controller of Send_Iou (owner-side authorization)
+        --   - receiver is the signatory of PaymentChannel (newOwner-side authorization)
+        -- Together they provide the mutual authorization Mutual_Transfer requires.
         exercise iouCid Mutual_Transfer with
           newOwner = receiver
 
 
+-- ===== SCRIPT: testIou =====
+-- Demonstrates a 2-hop IOU transfer: Alice → Bob → Charlie
 testIou = script do
     alice <- allocateParty "Alice"
     bob <- allocateParty "Bob"
     charlie <- allocateParty "Charlie"
 
+    -- Alice creates an IOU with herself as both issuer and owner
+    -- (she issues it to herself — normally issuer ≠ owner, but valid for demo)
+    -- AUTH: Alice is both signatories, so she can create it alone
     iou <- submit alice do
         createCmd Iou with
             issuer = alice
@@ -56,22 +122,28 @@ testIou = script do
             amount = 100.0
             currency = "USD"
 
+    -- Bob creates a channel: Alice can send to Bob through this channel
+    -- AUTH: Only Bob signs (receiver creates the channel)
     sab <- submit bob do
         createCmd PaymentChannel with
             sender = alice
             receiver = bob
 
+    -- Charlie creates a channel: Bob can send to Charlie
     sbc <- submit charlie do
         createCmd PaymentChannel with
             sender = bob
             receiver = charlie
 
+    -- Alice uses channel sab to send IOU to Bob
+    -- AUTH: alice is controller of Send_Iou; bob authorized channel creation
+    -- Together: satisfies Mutual_Transfer(owner=alice, newOwner=bob)
     iou2 <- submit alice do
         exerciseCmd sab Send_Iou with
             iouCid = iou
 
+    -- Bob uses channel sbc to send IOU to Charlie
+    -- AUTH: same pattern — bob controls Send_Iou, charlie authorized channel
     submit bob do
         exerciseCmd sbc Send_Iou with
-            iouCid = iou2 
-
-
+            iouCid = iou2

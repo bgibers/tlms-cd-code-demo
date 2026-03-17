@@ -1,23 +1,69 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: Test_Divulgence
+-- PURPOSE: Demonstrates Daml's divulgence mechanism through a concrete test.
+--          Shows that alice CANNOT see Bob's asset by default, but CAN see
+--          it AFTER the bank exercises a choice that fetches it (divulging it).
+-- LEARNING FOCUS: Divulgence, queryContractId returning None vs Some,
+--                 how fetch causes information sharing
+-- ============================================================
+-- DAML CONCEPT: Divulgence
+-- Divulgence occurs when party A learns about a contract they're not
+-- a signatory/observer on, because a choice they authorized FETCHED that contract.
+--
+-- Mechanism:
+--   1. ub (US Bank) creates DivulgenceTest with owner=ub, witness=alice
+--   2. alice exercises FetchContract on DivulgenceTest — this is a choice she controls
+--   3. Inside FetchContract, `fetch assetCid` is called on Bob's asset
+--   4. Since alice authorized this choice (she's the controller), and the choice
+--      fetched Bob's asset, alice now LEARNS about Bob's asset via divulgence
+--
+-- Before divulgence:  `queryContractId alice bobAssetCid` → None
+-- After divulgence:   `queryContractId alice bobAssetCid` → Some asset
+--
+-- WHY divulgence exists:
+-- When Alice exercises a choice that internally fetches contracts, those contracts
+-- become visible to all parties who authorized the choice. This is intentional —
+-- signatories need to see the data their choices operate on.
+--
+-- PRIVACY NOTE: Divulgence can be a privacy concern. If you don't want party X
+-- to learn about contract Y, ensure no choice X authorizes ever fetches Y.
+-- Canton supports "Explicit Disclosure" as a more controlled alternative
+-- (see Divulgence.daml for the full discussion).
+-- ============================================================
 module Test_Divulgence where
 
 import Divulgence
 import Test_AccountBalance
-import Daml.Script 
+import Daml.Script
 
 testDivulgence = script do
+  -- First, run the AccountBalance test to get alice, bob, ub, and bobAssetCid
   (alice, bob, ub, bobAssetCid) <- testAccountBalance
 
+  -- BEFORE DIVULGENCE: Alice tries to query Bob's asset
+  -- queryContractId returns None because alice is NOT a signatory or observer on bobAssetCid
   optAsset <- queryContractId alice bobAssetCid
 
-  debug optAsset 
+  -- This prints: None (alice cannot see Bob's asset)
+  debug optAsset
 
+  -- ===== SETUP DIVULGENCE =====
+  -- ub creates a DivulgenceTest contract with alice as witness
+  -- This contract gives alice the ability to "fetch" contracts inside it
   divTestCid <- submit ub do
     createCmd DivulgenceTest with owner = ub, witness = alice
 
+  -- ===== TRIGGER DIVULGENCE =====
+  -- alice exercises FetchContract — inside this choice, Bob's asset is fetched
+  -- This is the DIVULGENCE event: alice's authorization + the fetch = alice learns the asset
   bobDivulgedAsset <- submit alice do
-    exerciseCmd divTestCid FetchContract with assetCid = bobAssetCid    
-  
+    exerciseCmd divTestCid FetchContract with assetCid = bobAssetCid
+
+  -- AFTER DIVULGENCE: Alice now knows Bob's asset details
+  -- This prints: Some (Asset {...})
   debug bobDivulgedAsset
+  -- After this exercise, if you queried `queryContractId alice bobAssetCid`,
+  -- it would return Some (the asset is now divulged to alice).

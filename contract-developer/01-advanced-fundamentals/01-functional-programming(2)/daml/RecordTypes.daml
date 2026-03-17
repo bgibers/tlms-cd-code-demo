@@ -1,26 +1,56 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: RecordTypes
+-- PURPOSE: Demonstrates generic (parameterized) record types in Daml.
+--          Shows how types can be polymorphic over their field types.
+-- LEARNING FOCUS: Type parameters (generics), polymorphic data types,
+--                 two syntactic forms for record definitions
+-- ============================================================
 module RecordTypes where
 
 import Daml.Script
 
--- data AlternativeCoordinate a b = AlternativeCoordinate a b
+-- ===== GENERIC RECORD TYPE =====
+-- DAML CONCEPT: Type parameters
+-- `Coordinate a b` is a generic type. `a` and `b` are type variables.
+-- This lets you create Coordinate Int Int, Coordinate Text Decimal, etc.
+-- WHY generics: Avoids writing a separate type for every combination.
+-- The type parameters appear in the field types: first:a, second:b
 
+-- Brace syntax form (Haskell-style):
 data Coordinate a b = Coordinate {first: a; second: b}
     deriving (Eq, Show)
 
+-- Equivalent `with` syntax (commented out):
 -- data Coordinate a b = Coordinate with
 --     first: a
 --     second: b
 --         deriving (Eq, Show)
 
+-- DAML CONCEPT: Alternative — positional constructor (no field names)
+-- `data AlternativeCoordinate a b = AlternativeCoordinate a b`
+-- Here the constructor takes positional args: AlternativeCoordinate 1 2
+-- No field names → can't access with .first; must use pattern matching.
+-- WHY records are preferred: Named fields are self-documenting.
+
+-- data AlternativeCoordinate a b = AlternativeCoordinate a b
 
 
-testC = script do 
+-- ===== USAGE EXAMPLE =====
+-- DAML CONCEPT: Type annotation on let bindings
+-- `cdn : Coordinate Int Int` tells the compiler which concrete type to use.
+-- Without it, `Coordinate 1 2` would still work (type inference), but
+-- the annotation makes it explicit and aids readability.
+testC = script do
     let
-        cdn : Coordinate Int Int 
-        cdn = Coordinate 1 2
+        cdn : Coordinate Int Int   -- type annotation: both params are Int
+        cdn = Coordinate 1 2       -- constructs with: first=1, second=2
 
-    debug $ cdn
+    debug $ cdn  -- Prints: Coordinate {first = 1, second = 2}
 
+-- NOTES:
+-- cdn.first  → 1  (field access)
+-- cdn.second → 2  (field access)
+-- cdn with first = 99  → Coordinate {first = 99, second = 2}  (record update)

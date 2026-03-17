@@ -1,10 +1,24 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: ThrowingException
+-- PURPOSE: Demonstrates throwing custom exceptions using 'throw'
+--          and the 'when' helper for conditional throws.
+-- LEARNING FOCUS: throw, when, and the "throw-first" pattern
+-- ============================================================
+-- PATTERN: "Throw first, then proceed"
+-- Instead of try-catch (reactive), use throw to PROACTIVELY fail
+-- early when an invariant is violated.
+-- This is cleaner than catching PreconditionFailed from ensure.
+-- ============================================================
 module ThrowingException where
 
 import Daml.Script
 import DA.Exception
+-- DAML CONCEPT: DA.Action (when)
+-- 'when condition action' runs 'action' only if condition is True.
+-- Like: if condition then action else return ()
 import DA.Action (when)
 
 template SocialNetworkUser
@@ -16,8 +30,8 @@ template SocialNetworkUser
         signatory username
         observer following
 
-        key username : Party 
-        maintainer key 
+        key username : Party
+        maintainer key
 
         ensure alias /= ""
 
@@ -25,33 +39,50 @@ template SocialNetworkUser
             with
                 userToFollow: Party
             controller username
-            do       
+            do
                 assertMsg "You cannot follow yourself" (userToFollow /= username)
                 assertMsg "You cannot follow the same user twice" (notElem userToFollow following)
                 create this with following = userToFollow :: following
 
+        -- ===== CHOICE: ChangeAlias (with explicit throw) =====
+        -- DAML CONCEPT: throw keyword
+        -- 'throw exception' immediately aborts the current Update with that exception.
+        -- The exception propagates up through try-catch handlers or aborts the transaction.
+        --
+        -- DAML CONCEPT: when
+        -- 'when condition $ action' = if condition then action else return ()
+        -- Cleaner than writing if/then/else when the else branch is "do nothing"
+        --
+        -- WHY throw over relying on ensure:
+        --   1. More informative: custom exception has fieldName and details
+        --   2. Proactive: fail BEFORE archiving self (no state changes happen)
+        --   3. Testable: callers can catch ChangeFailed specifically
         nonconsuming choice ChangeAlias: ContractId SocialNetworkUser
             with
                 newAlias: Text
             controller username
             do
-                when (newAlias == "") $ -- import DA.Action (when)
+                -- DAML CONCEPT: when + throw pattern
+                -- Check the invariant FIRST. If violated, throw immediately.
+                -- The '$' operator applies the right side as an argument to the left side.
+                -- Equivalent to: when (newAlias == "") (throw ChangeFailed with ...)
+                when (newAlias == "") $
                     throw ChangeFailed with
                         fieldName = "alias"
                         details = "cannot be empty"
-                
-                archive self 
+
+                -- Only reached if newAlias is not empty
+                archive self
                 create this with alias = newAlias
 
 
--- Custom Exception
+-- DAML CONCEPT: exception definition (repeated from CustomException.daml — in practice, share via import)
 exception ChangeFailed
     with
         fieldName: Text
         details: Text
     where
         message "Provided input is invalid."
-
 
 
 test = script do
@@ -63,42 +94,25 @@ test = script do
             username = alice
             following = []
             alias = "aliceAlias"
-    
-    submit alice do 
+
+    -- This THROWS ChangeFailed. Without a surrounding try-catch, the transaction FAILS.
+    -- submitMustFail would be the correct way to test this:
+    -- submitMustFail alice do
+    --     exerciseCmd aliceCid ChangeAlias with newAlias = ""
+    --
+    -- But here we call it with submit — this will FAIL the script (intentional demo of throw)
+    submit alice do
         exerciseCmd aliceCid ChangeAlias with newAlias = ""
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
--- case ver.
+-- ALTERNATIVE: case-based approach (no exceptions needed)
+-- Shows returning Either directly without throwing:
 -- nonconsuming choice ChangeAlias: Either Text (ContractId SocialNetworkUser)
---     with
---         newAlias: Text
+--     with newAlias: Text
 --     controller username
 --     do
 --         case newAlias of
---             "" -> do
---                 let 
---                     err = ChangeFailed with 
---                         fieldName = "alias"
---                         details = "cannot be empty"
---                     result = Left $ err.fieldName <> " " <> err.details
---                 pure result
-
---             _ -> do
+--             "" -> pure (Left "alias cannot be empty")
+--             _  -> do
 --                 archive self
 --                 cid <- create this with alias = newAlias
---                 let result = Right cid 
---                 pure result
+--                 pure (Right cid)

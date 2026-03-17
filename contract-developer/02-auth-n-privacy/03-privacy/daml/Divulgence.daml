@@ -1,21 +1,63 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: Divulgence
+-- PURPOSE: Demonstrates DIVULGENCE — how a party can learn
+--          about a contract they are not an observer of,
+--          via a 'fetch' call inside a choice they control.
+-- LEARNING FOCUS: Divulgence as a privacy mechanism
+-- ============================================================
+-- DIVULGENCE EXPLAINED:
+--   Normally: party can only see contracts where they are signatory/observer.
+--   Divulgence exception: if a SIGNATORY of contract X exercises a choice that
+--   fetches contract Y, then ALL SIGNATORIES of that choice's contract learn
+--   the details of Y (even if they're not an observer of Y).
+--
+-- HOW IT WORKS HERE:
+--   - owner creates DivulgenceTest (signatory: owner, observer: witness)
+--   - witness exercises FetchContract, passing an Asset ContractId
+--   - fetch inside the choice reads the Asset
+--   - Now witness has "seen" the Asset via the ledger's divulgence mechanism
+--   - This is a one-time snapshot — witness is NOT informed of future archives
+--
+-- NOTE: Divulgence is being phased out in favor of Explicit Disclosure
+--   (available in newer Daml SDK versions). Prefer Explicit Disclosure in production.
+--   See Market.daml comments for the explicit disclosure alternative.
+-- ============================================================
 module Divulgence where
 
-import AccountBalance
+import AccountBalance   -- brings in the Asset template
 
+-- ===== TEMPLATE: DivulgenceTest =====
+-- A simple contract that demonstrates divulgence via FetchContract.
 template DivulgenceTest
   with
-    owner : Party
-    witness : Party
+    owner : Party    -- creates the contract
+    witness : Party  -- will learn about another contract via divulgence
   where
     signatory owner
+
+    -- PRIVACY: witness can see this DivulgenceTest contract.
     observer witness
 
+    -- ===== CHOICE: FetchContract =====
+    -- DAML CONCEPT: fetch causing divulgence
+    -- witness is the controller (they initiate this).
+    -- Inside the choice body, fetch reads the Asset.
+    -- Because owner is a signatory of DivulgenceTest, owner's authority
+    -- "covers" this exercise. The Asset's signatories (issuer, owner_of_asset)
+    -- will have their fetch call authorized.
+    --
+    -- EFFECT: witness now "knows" the details of assetCid's Asset
+    -- even if they were not an observer/signatory of that Asset.
+    -- This is divulgence — the contract details are "divulged" to witness.
     choice FetchContract : Asset
       with
-        assetCid : ContractId Asset
+        assetCid : ContractId Asset   -- the Asset to divulge to witness
       controller witness
       do
+        -- This fetch authorizes witness to read the Asset.
+        -- Without DivulgenceTest and this choice, witness couldn't see the Asset.
         fetch assetCid
+        -- Returns the Asset record — witness receives the full Asset data.

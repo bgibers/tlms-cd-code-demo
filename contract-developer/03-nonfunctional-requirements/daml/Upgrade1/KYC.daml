@@ -1,11 +1,42 @@
-module Upgrade1.KYC where 
+-- ============================================================
+-- MODULE: Upgrade1.KYC
+-- PURPOSE: The first upgrade step — adds a KYC (Know Your Customer)
+--          contract to the existing Position infrastructure.
+--          This demonstrates adding NEW contract types to a live system
+--          without modifying existing contracts.
+-- LEARNING FOCUS: Additive upgrades, new contract types alongside existing ones
+-- ============================================================
+-- DAML CONCEPT: Upgrade Strategy — Additive New Types
+-- One of the simplest upgrade strategies is to ADD new contract types
+-- without modifying existing ones.
+-- The existing Position contracts are UNCHANGED.
+-- KYC is a NEW template that references the same parties.
+--
+-- This models the real-world scenario:
+-- A bank already has Position contracts tracking cash holdings.
+-- The regulator requires KYC information to be recorded on-chain.
+-- Solution: Add a KYC template. Existing positions don't need to change.
+--
+-- Contrast with MODIFYING an existing template:
+-- If we added a `kycStatus` field to Position, we'd need to:
+-- 1. Upgrade all existing Position contracts
+-- 2. Use UpgradeModule patterns (see UpgradeModule.daml)
+-- This is more complex. When possible, prefer additive changes.
+-- ============================================================
+module Upgrade1.KYC where
 
 
+-- ===== TEMPLATE: KYC =====
+-- Records that a bank has completed KYC for a counterparty.
+-- Simple 3-party contract: bank signs, counterParty observes.
+-- WHY bank signs but counterParty only observes:
+-- KYC is the bank's obligation to regulators. The bank creates and maintains it.
+-- The counterParty can SEE their KYC status but doesn't need to authorize its creation.
 template KYC
   with
-    bank : Party
-    counterParty : Party
-    address : Text
+    bank : Party          -- The bank that performed the KYC check
+    counterParty : Party  -- The customer who was checked
+    address : Text        -- Verified address from KYC process
   where
-    signatory bank
-    observer counterParty
+    signatory bank        -- Bank authorizes creation (they're responsible for KYC)
+    observer counterParty -- Customer can see their own KYC record

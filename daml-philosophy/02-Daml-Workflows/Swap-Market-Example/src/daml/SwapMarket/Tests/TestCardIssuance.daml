@@ -1,6 +1,30 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: SwapMarket.Tests.TestCardIssuance
+-- PURPOSE: Tests for the Card issuance and locking mechanics.
+--          Exhaustively verifies authorization requirements for Card_Lock:
+--          ALL parties (owner + ALL lock holders) must authorize.
+-- LEARNING FOCUS: submitMultiMustFail, DA.List sort, passTime,
+--                 exhaustive authorization testing, DefaultCardSetup fixture
+-- ============================================================
+-- KEY CONCEPT TESTED: Multi-party lock authorization
+-- Card_Lock has controller: owner, lock.holders
+-- This means ALL of {owner, bob, charlie} must sign in the SAME transaction.
+-- The test below methodically verifies each combination FAILS until all 3 sign.
+--
+-- SECURITY VERIFICATION PATTERN:
+-- For critical authorization requirements, test EVERY insufficient subset:
+--   [alice]          → fails (no holders)
+--   [bob]            → fails (no owner, not all holders)
+--   [charlie]        → fails (no owner, not all holders)
+--   [alice, bob]     → fails (charlie missing)
+--   [alice, charlie] → fails (bob missing)
+--   [bob, charlie]   → fails (alice=owner missing)
+--   [alice, bob, charlie] → SUCCEEDS
+-- This gives confidence the authorization model is correctly enforced.
+-- ============================================================
 module SwapMarket.Tests.TestCardIssuance where
 
 import DA.Assert
@@ -11,140 +35,174 @@ import Daml.Script
 
 import SwapMarket.CardIssuance
 
--- | Convenience data type to caputure the allocated setup data
+-- ===== TEST FIXTURE =====
+-- DAML CONCEPT: Data type bundling test setup results
+-- Groups all the data from `runDefaultCardSetup` into one record.
+-- Allows test functions to destructure just what they need:
+--   `DefaultCardSetup with {alice, aliceCardId} <- runDefaultCardSetup`
 data DefaultCardSetup = DefaultCardSetup with
   issuerA : Party
   issuerB : Party
   alice : Party
   bob : Party
-  aliceCard : Card
-  aliceCardId : ContractId Card
+  aliceCard : Card               -- Full Card record (for comparison in assertions)
+  aliceCardId : ContractId Card  -- ContractId for exercising choices
   bobCard : Card
   bobCardId : ContractId Card
 
 
-runDefaultCardSetup : Script DefaultCardSetup 
+-- ===== SETUP: Issue cards to Alice and Bob =====
+-- DAML CONCEPT: Script helper function `issueCard`
+-- Encapsulates the two-step IssueCardProposal → Accept workflow.
+-- Used in both this module and TestMarket.
+runDefaultCardSetup : Script DefaultCardSetup
 runDefaultCardSetup = do
   issuerA <- allocateParty "Issuer A"
   issuerB <- allocateParty "Issuer B"
-  
+
   alice <- allocateParty "Alice"
   bob <- allocateParty "Bob"
 
   let aliceCard = Card with
         cardDetails = CardDetails with
-          details = "Alpha Black Lotus"
+          details = "Alpha Black Lotus"   -- Famous Magic the Gathering card
           issuer = issuerA
         owner = alice
   aliceCardId <- issueCard aliceCard
 
   let bobCard = Card with
         cardDetails = CardDetails with
-          details = "Pikachu Illustrator"
+          details = "Pikachu Illustrator"  -- Famous Pokemon card
           issuer = issuerB
         owner = bob
   bobCardId <- issueCard bobCard
 
   pure DefaultCardSetup with ..
 
+-- ===== TEST: Card_Transfer requires mutual consent =====
+-- DAML CONCEPT: submitMulti [alice, bob] [] do
+-- Both alice AND bob must authorize the transfer in the same transaction.
+-- This enforces "mutual consent" — prevents card spam.
 testTransfer : Script ()
 testTransfer = do
   DefaultCardSetup with .. <- runDefaultCardSetup
 
-  -- Alice and Bob both have one card each
+  -- Verify initial state: one card each
   aliceCards <- query @Card alice
   length aliceCards === 1
 
   bobCards <- query @Card bob
   length bobCards === 1
 
-  -- Transfer Alice's card
+  -- Card_Transfer requires both current owner (alice) and new owner (bob) to authorize
   newBobCardId <- submitMulti [alice, bob] [] $ exerciseCmd aliceCardId Card_Transfer with newOwner = bob
 
   -- Alice has no more cards
   aliceCardsNew <- query @Card alice
   length aliceCardsNew === 0
 
-  -- Bob has exactly the cards of Alice and Bob
+  -- DAML CONCEPT: DA.List.sort for deterministic comparison
+  -- `query @Card` returns in an unspecified order.
+  -- `sort` ensures we compare the same set regardless of order.
+  -- `map (._2.cardDetails)` extracts just the cardDetails from each (ContractId, Card) pair.
   bobCardsNew <- query @Card bob
-  sort (map (._2.cardDetails) bobCardsNew) === 
+  sort (map (._2.cardDetails) bobCardsNew) ===
     sort (map (._2.cardDetails) (aliceCards ++ bobCards))
 
 
+-- ===== SETUP: Lock Alice's card with multi-party TimeLock =====
+-- Returns: charlie (extra lock holder), lockedCardId, original setup
 setupLockedCard : Script (Party, ContractId LockedCard, DefaultCardSetup)
 setupLockedCard = do
   setup@DefaultCardSetup with .. <- runDefaultCardSetup
   charlie <- allocateParty "Charlie"
 
-  -- Lock Alice's card
+  -- Card_Lock command: Alice's card, locked by bob and charlie
   now <- getTime
-  let lockCmd = exerciseCmd aliceCardId Card_Lock with 
+  let lockCmd = exerciseCmd aliceCardId Card_Lock with
         lock = TimeLock with
-          holders = [bob, charlie]
-          expiresAt = now `addRelTime` (minutes 5)
+          holders = [bob, charlie]         -- Both bob and charlie are lock holders
+          expiresAt = now `addRelTime` (minutes 5)  -- Lock expires in 5 minutes
 
-  -- Locking requires authorization from the owner and lock holder
-  submitMultiMustFail [alice] [] lockCmd 
-  submitMultiMustFail [bob] [] lockCmd 
-  submitMultiMustFail [charlie] [] lockCmd 
-  submitMultiMustFail [alice, bob] [] lockCmd 
-  submitMultiMustFail [alice, charlie] [] lockCmd 
-  submitMultiMustFail [bob, charlie] [] lockCmd 
-  lockedCardId <- submitMulti [alice, bob, charlie] [] lockCmd 
+  -- DAML CONCEPT: submitMultiMustFail — test that insufficient authorization FAILS
+  -- Any proper subset of {alice, bob, charlie} should fail.
+  -- This exhaustively tests all 6 subsets to confirm the authorization requirement.
+  submitMultiMustFail [alice] [] lockCmd           -- owner alone: fails (holders missing)
+  submitMultiMustFail [bob] [] lockCmd             -- holder alone: fails (owner missing, charlie missing)
+  submitMultiMustFail [charlie] [] lockCmd         -- holder alone: fails (owner missing, bob missing)
+  submitMultiMustFail [alice, bob] [] lockCmd      -- owner + 1 holder: fails (charlie missing)
+  submitMultiMustFail [alice, charlie] [] lockCmd  -- owner + 1 holder: fails (bob missing)
+  submitMultiMustFail [bob, charlie] [] lockCmd    -- both holders: fails (owner missing)
+  -- Only ALL THREE together succeed
+  lockedCardId <- submitMulti [alice, bob, charlie] [] lockCmd
 
-  -- Alice's card is gone
+  -- Alice's card is now archived (replaced by LockedCard)
   None <- queryContractId alice aliceCardId
 
   pure (charlie, lockedCardId, setup)
 
+-- ===== TEST: Unlock requires ALL lock holders =====
+-- Only {bob, charlie} can unlock — the holders list determines who can unlock.
 testLockUnlock : Script ()
 testLockUnlock = do
   (charlie, lockedCardId, DefaultCardSetup with ..) <- setupLockedCard
 
-  -- Unlocking requires authorization from the lock holders
   let unlockCmd = exerciseCmd lockedCardId LockedCard_Unlock
-  submitMultiMustFail [alice] [] unlockCmd 
-  submitMultiMustFail [bob] [] unlockCmd 
-  submitMultiMustFail [charlie] [] unlockCmd 
+  submitMultiMustFail [alice] [] unlockCmd    -- owner alone can't unlock
+  submitMultiMustFail [bob] [] unlockCmd      -- one holder alone can't unlock
+  submitMultiMustFail [charlie] [] unlockCmd  -- one holder alone can't unlock
+  -- All lock holders together can unlock (owner not needed for unlock)
   aliceCardId <- submitMulti [bob, charlie] [] unlockCmd
 
-  -- And back
+  -- Card is back and identical to original
   Some aliceNewCard <- queryContractId alice aliceCardId
   aliceNewCard === aliceCard
 
   pure ()
 
+-- ===== TEST: Lock expiry as owner =====
+-- DAML CONCEPT: passTime
+-- `passTime (minutes 5)` advances ledger time by 5 minutes.
+-- `getTime` in contracts reads this advanced ledger time.
+-- WHY ledger time matters: LockedCard_LockExpire validates that the lock has expired.
+-- Before passTime: lock.expiresAt is in the future → assertMsg fails → expire fails.
+-- After passTime: lock.expiresAt is in the past → assertMsg passes → expire succeeds.
 testLockExpiryAsOwner : Script ()
 testLockExpiryAsOwner = do
   (charlie, lockedCardId, DefaultCardSetup with ..) <- setupLockedCard
 
-  -- Expiry does not work right now ...
-  submitMustFail alice $ exerciseCmd lockedCardId LockedCard_LockExpire with actor = alice 
+  -- Expiry does not work right now (lock hasn't expired)...
+  submitMustFail alice $ exerciseCmd lockedCardId LockedCard_LockExpire with actor = alice
 
   -- ... but it does after 5 mins
   passTime (minutes 5)
-  submit alice $ exerciseCmd lockedCardId LockedCard_LockExpire with actor = alice 
+  submit alice $ exerciseCmd lockedCardId LockedCard_LockExpire with actor = alice
 
   pure ()
 
 
+-- ===== TEST: Lock expiry as lock holder =====
+-- Either the owner OR a lock holder can trigger expiry (if they're a stakeholder).
+-- `actor` parameter lets any stakeholder trigger the expiry.
 testLock_ExpiryAsLockholder : Script ()
 testLock_ExpiryAsLockholder = do
   (charlie, lockedCardId, DefaultCardSetup with ..) <- setupLockedCard
 
   -- Expiry does not work right now ...
-  submitMustFail charlie $ exerciseCmd lockedCardId LockedCard_LockExpire with actor = charlie 
+  submitMustFail charlie $ exerciseCmd lockedCardId LockedCard_LockExpire with actor = charlie
 
   -- ... but it does after 5 mins
   passTime (minutes 5)
-  submit charlie $ exerciseCmd lockedCardId LockedCard_LockExpire with actor = charlie 
+  submit charlie $ exerciseCmd lockedCardId LockedCard_LockExpire with actor = charlie
 
   pure ()
 
 
--- Utitlies
------------
-
+-- ===== UTILITY: issueCard =====
+-- DAML CONCEPT: Reusable script helper
+-- Encapsulates the IssueCardProposal → Accept two-step workflow.
+-- Used by both this test module and TestMarket.
+-- This is the equivalent of a "factory function" in test setup code.
 issueCard : Card -> Script (ContractId Card)
 issueCard card = do
   cardProposalId <- submit card.cardDetails.issuer $ createCmd IssueCardProposal with

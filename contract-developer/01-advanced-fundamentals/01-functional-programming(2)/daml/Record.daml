@@ -1,12 +1,38 @@
--- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved. 
+-- Copyright (c) 2023 Digital Asset (Switzerland) GmbH and/or its affiliates. All Rights Reserved.
 -- SPDX-License-Identifier: Apache-2.0
 
+-- ============================================================
+-- MODULE: Record
+-- PURPOSE: Shows the two syntactic forms for defining record types in Daml.
+--          Both forms are semantically identical — it's a stylistic choice.
+-- LEARNING FOCUS: Record syntax, product types, field access
+-- ============================================================
 module Record where
 
 import Daml.Script
 
+-- ===== RECORD TYPE DEFINITION: `with` syntax =====
+-- DAML CONCEPT: Record (product type) using `with` keyword
+-- This is the idiomatic Daml style. Fields are separated by newlines.
+-- Access fields with: record.fieldName  (e.g., pr.name)
+-- Update a field: record with fieldName = newValue  (creates a NEW record)
 data PersonalRecord = PersonalRecord with
     name : Text
     id : Int
 
+-- ===== ALTERNATIVE SYNTAX: brace syntax =====
+-- DAML CONCEPT: Record using `{...}` with semicolons (Haskell-style)
+-- The commented-out form below is EQUIVALENT to the `with` form above.
+-- Both define the same type and constructor.
+-- WHY the `with` form is preferred: More readable, especially for many fields.
+-- The brace form comes from Haskell — Daml supports it for compatibility.
+
 -- data PersonalRecord = PersonalRecord {name : Text; id : Int}
+
+-- ===== KEY PROPERTIES OF RECORDS =====
+-- 1. Immutable: You never modify a record in place. You create a new one.
+-- 2. Named fields: Unlike tuples (Int, Text), records have labels.
+-- 3. Product type: Holds ALL fields simultaneously (AND semantics).
+--    A PersonalRecord is always a name AND an id — both are required.
+-- 4. Pattern matching: Can destructure records with { } or `with`
+--    e.g., let PersonalRecord{name, id} = pr

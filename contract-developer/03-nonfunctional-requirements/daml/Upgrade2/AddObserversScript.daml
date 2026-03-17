@@ -1,4 +1,12 @@
-module Upgrade2.AddObserversScript where 
+-- ============================================================
+-- MODULE: Upgrade2.AddObserversScript
+-- PURPOSE: Tests the AdditionalRules pattern from Upgrade2.
+--          Shows how users can set observers on their Position contracts
+--          using the "rule contract" delegation pattern.
+-- LEARNING FOCUS: grantUserRights, batch operations with forA_,
+--                 rule contract usage, bankReader / CanReadAs
+-- ============================================================
+module Upgrade2.AddObserversScript where
 
 import Daml.Script
 import InitialState.Cash
@@ -8,25 +16,45 @@ import DA.Foldable (forA_)
 
 testSetObservers : Script ()
 testSetObservers = script do
+  -- Initialize cash state (Alice: 5 positions, Bob: 3 positions)
   (tps@TestParties{..}, tus@TestUsers{..}) <- initCash
 
-  -- Create a reader party and give access to Alice and Bob
+  -- ===== SETUP: BankReader party with read rights =====
+  -- DAML CONCEPT: allocateParty for auxiliary parties
+  -- BankReader represents a party with "read-only" access (e.g., auditor, regulator).
+  -- grantUserRights lets existing users "read as" this party.
   pBankReader <- allocateParty "BankReader"
+  -- DAML CONCEPT: grantUserRights
+  -- `CanReadAs p` allows the user to see contracts visible to p.
+  -- Alice and Bob can now read contracts that pBankReader is observer on.
   grantUserRights uAlice [CanReadAs pBankReader]
   grantUserRights uBob [CanReadAs pBankReader]
 
-  -- Bank Issues the new rule
+  -- ===== STEP 1: Bank issues the rules contract =====
+  -- This is the "policy" that governs SetObservers operations.
+  -- WHY bank creates it: proves bank endorses these rules.
+  -- Without this contract, no one can set observers via these rules.
   rules <- submitUser uBank do
     createCmd AdditionalRules with
       bank = pBank
       bankReader = pBankReader
 
-  -- Alice can make Bob observer on all her positions
+  -- ===== STEP 2: Alice sets observers on all her positions =====
+  -- DAML CONCEPT: batch operation with forA_
+  -- `query @Position pAlice` → returns [(ContractId Position, Position)]
+  -- `forA_` iterates and calls SetObservers for each position.
+  -- The `_` in forA_ means "discard results" (we don't need the new ContractIds).
   alicePositions <- query @Position pAlice
   forA_ (alicePositions) (\(cid, _) -> do
+    -- Alice exercises the RULES contract (not the Position directly)
+    -- This is the delegation pattern: Alice controls her positions via the bank's rules.
     submitUser uAlice do
-      exerciseCmd rules SetObservers with 
+      exerciseCmd rules SetObservers with
         owner = pAlice
         positionCid = cid
-        new_obs = [pBob]
+        new_obs = [pBob]    -- Bob can now see Alice's positions
     )
+  -- After this loop:
+  -- - All 5 of Alice's Position contracts now have obs = [pBob]
+  -- - The original Position contracts were archived and replaced
+  -- - Bob can now query @Position pBob and see Alice's positions too
